@@ -15,13 +15,13 @@
 
 ## Implementation Phases
 
-### Phase 0 — Project scaffolding
+### Phase 0 — Project scaffolding ✅
 
-- [ ] Set up Rust project with edition 2024.
-- [ ] Add dependencies: `rusqlite` (bundled), `pulldown-cmark`, `notify`,
+- [x] Set up Rust project with edition 2024.
+- [x] Add dependencies: `rusqlite` (bundled), `pulldown-cmark`, `notify`,
       `serde`, `serde_yaml`, `sha2`, `ignore`, `log`.
-- [ ] Define workspace layout (lib crate with example(s) in `examples/`).
-- [ ] Configure CI (GitHub Actions: `cargo test`, `cargo clippy`, `cargo fmt`).
+- [x] Define workspace layout (lib crate with example in `examples/`).
+- [x] Configure CI (GitHub Actions: `cargo test`, `cargo clippy`, `cargo fmt`).
 
 ### Phase 1 — Core scanning & parsing
 

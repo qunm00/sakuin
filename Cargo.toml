@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+rusqlite = { version = "0.41", features = ["bundled"] }
+pulldown-cmark = "0.13"
+notify = "8"
+notify-debouncer-full = "0.7"
+serde = { version = "1", features = ["derive"] }
+yaml_serde = "0.10"
+sha2 = "0.11"
+ignore = "0.4"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
