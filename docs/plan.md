@@ -23,13 +23,13 @@
 - [x] Define workspace layout (lib crate with example in `examples/`).
 - [x] Configure CI (GitHub Actions: `cargo test`, `cargo clippy`, `cargo fmt`).
 
-### Phase 1 — Core scanning & parsing
+### Phase 1 — Core scanning & parsing ✅
 
-- [ ] Implement `Scanner` — recursive dir walk, `.gitignore` support.
-- [ ] Implement `Parser` — frontmatter extraction, heading collection,
+- [x] Implement `Scanner` — recursive dir walk, `.gitignore` support.
+- [x] Implement `Parser` — frontmatter extraction, heading collection,
       link collection, text extraction.
-- [ ] Wikilink support (`[[target]]` and `[[target|label]]`).
-- [ ] Write unit tests for parser against known Markdown samples.
+- [x] Wikilink support (`[[target]]` and `[[target|label]]`).
+- [x] Write unit tests for parser against known Markdown samples.
 
 ### Phase 2 — SQLite storage
 

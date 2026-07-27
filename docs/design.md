@@ -206,20 +206,17 @@ CREATE INDEX IF NOT EXISTS idx_tags_tag        ON tags(tag);
 | Frontmatter | Optional. If a file starts with `---\n...\n---`, capture raw text; optionally parse with `serde_yaml` / `toml`. |
 | Headings | Walk the event stream for `Event::Start(Heading(level, ..))`. Generate anchor slugs (GitHub-compatible: lowercase, strip punctuation, replace spaces with `-`). |
 | Links | Collect `Event::Start(Link(..))`, `Event::Start(Image(..))`, and wikilinks via custom parser (see below). |
-| Wikilinks | Pre-process or post-process: match `[[target|label]]` and `[[target]]` patterns. `pulldown-cmark` doesn't support them natively, so we either use a regex pre-pass or a custom `BrokenLink` callback. |
+| Wikilinks | Use `pulldown-cmark` 0.13+'s native wikilink support via `Options::ENABLE_WIKILINKS`. Detects `[[target]]` and `[[target|label]]` directly as `Tag::Link` with `LinkType::WikiLink`. No pre-processing needed. |
 | Text extraction | Concatenate all `Event::Text` for FTS body. |
 
 #### Wikilink handling strategy
 
-Option A (recommended): Use a light regex/cursor pre-scan on the raw source
-before passing to pulldown-cmark, replacing `[[...]]` with a unique placeholder
-that pulldown-cmark treats as a link, then post-process to restore. This keeps
-parsing within one pass.
-
-Option B: A two-pass approach — first collect wikilinks by regex, then feed
-to pulldown-cmark for standard elements. Simpler but slightly less efficient.
-
-**Initial choice:** Option B for simplicity. We can optimise later.
+Pulldown-cmark 0.13+ includes native wikilink support via the
+`Options::ENABLE_WIKILINKS` extension flag. When enabled, `[[target]]` and
+`[[target|label]]` patterns are parsed directly into `Tag::Link` events with
+`LinkType::WikiLink { has_pothole: bool }`. This eliminates the need for any
+pre-processing or custom scanning — the parser handles wikilinks in the same
+event stream as standard Markdown links.
 
 ### 3. `IndexStore` — SQLite persistence
 
@@ -434,7 +431,7 @@ across runs).
 |---|---|
 | **SQLite via `rusqlite`** | Zero-config, embedded, widely used, supports FTS5. No server process. |
 | **`pulldown-cmark`** | The fastest CommonMark parser in Rust; well-maintained; event-based (streaming). |
-| **Custom wikilink parsing** | `pulldown-cmark` doesn't support `[[...]]`. A regex pre-pass is simple and avoids forking the parser. |
+| **Native wikilink support** | `pulldown-cmark` 0.13+ provides `Options::ENABLE_WIKILINKS` which natively parses `[[...]]` patterns. No custom pre-processing needed. |
 | **Separate `set_*` methods vs. one `index_file`** | Separation allows re-indexing partial data (e.g., only headings) if an application wants to extend Sakuin. |
 | **Content hash for dedup** | Avoids re-parsing unchanged files during full scan. Not strictly needed for incremental sync, but useful for "re-scan everything" commands. |
 | **Debounced file watching** | Raw `notify` events can fire many times per save. Debouncing coalesces them into one update. |
