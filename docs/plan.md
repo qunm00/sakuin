@@ -39,6 +39,11 @@
 - [ ] Write integration tests: index a sample workspace, query it, verify
       results match expected values.
 
+### ⚠️ Pre-Phase 3 — Parser tags extraction
+
+- [x] Add `tags: Vec<String>` field to `ParseResult` so callers don't have
+      to parse frontmatter themselves.
+
 ### Phase 3 — Query API
 
 - [ ] Implement all `Query` methods.
