@@ -188,12 +188,56 @@ impl Parser {
             });
         }
 
+        let tags = extract_tags_from_frontmatter(frontmatter.as_deref());
+
         ParseResult {
             frontmatter,
+            tags,
             headings,
             links,
             body: body_parts.concat(),
         }
+    }
+}
+
+// ── Helper: Tag extraction from YAML frontmatter ────────
+
+/// Deserialization helper: a `tags` field that can be a single string
+/// or a sequence of strings.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum TagsOrString {
+    Sequence(Vec<String>),
+    Single(String),
+}
+
+/// Deserialization helper: top-level frontmatter shape.
+#[derive(serde::Deserialize)]
+struct Frontmatter {
+    #[serde(default)]
+    tags: Option<TagsOrString>,
+}
+
+/// Extract tag strings from a YAML frontmatter string.
+///
+/// Looks for a `tags` key that is either a sequence of strings
+/// or a single string.  Returns an empty `Vec` when the frontmatter
+/// is `None` or contains no `tags` key.
+pub fn extract_tags_from_frontmatter(frontmatter: Option<&str>) -> Vec<String> {
+    let yaml_str = match frontmatter {
+        Some(s) if !s.is_empty() => s,
+        _ => return Vec::new(),
+    };
+
+    let parsed: Frontmatter = match yaml_serde::from_str(yaml_str) {
+        Ok(fm) => fm,
+        Err(_) => return Vec::new(),
+    };
+
+    match parsed.tags {
+        Some(TagsOrString::Sequence(tags)) => tags,
+        Some(TagsOrString::Single(tag)) => vec![tag],
+        None => Vec::new(),
     }
 }
 
@@ -355,6 +399,7 @@ fn strip_html_tags(s: &str) -> String {
 #[derive(Debug)]
 pub struct ParseResult {
     pub frontmatter: Option<String>,
+    pub tags: Vec<String>,
     pub headings: Vec<Heading>,
     pub links: Vec<Link>,
     pub body: String,
@@ -411,6 +456,34 @@ mod tests {
             result.frontmatter.as_deref().unwrap(),
             "title: Test\ntags:\n  - rust\n  - markdown"
         );
+        assert_eq!(result.tags, vec!["rust", "markdown"]);
+    }
+
+    #[test]
+    fn parse_frontmatter_tags_single() {
+        let source = "---\ntags: justone\n---\n\n# Hello";
+        let result = Parser::new().parse(source);
+        assert_eq!(result.tags, vec!["justone"]);
+    }
+
+    #[test]
+    fn parse_frontmatter_tags_flow() {
+        let source = "---\ntags: [tag1, tag2]\n---\n\n# Hello";
+        let result = Parser::new().parse(source);
+        assert_eq!(result.tags, vec!["tag1", "tag2"]);
+    }
+
+    #[test]
+    fn parse_frontmatter_no_tags() {
+        let source = "---\ntitle: Hello\n---\n\n# World";
+        let result = Parser::new().parse(source);
+        assert!(result.tags.is_empty());
+    }
+
+    #[test]
+    fn parse_no_frontmatter_tags_empty() {
+        let result = Parser::new().parse("# Hello");
+        assert!(result.tags.is_empty());
     }
 
     #[test]
@@ -641,6 +714,7 @@ mod tests {
     fn parse_empty_document() {
         let result = Parser::new().parse("");
         assert!(result.frontmatter.is_none());
+        assert!(result.tags.is_empty());
         assert!(result.headings.is_empty());
         assert!(result.links.is_empty());
         assert!(result.body.is_empty());
@@ -672,6 +746,7 @@ See <https://auto.link> for more.
 
         // Frontmatter
         assert!(result.frontmatter.is_some());
+        assert_eq!(result.tags, vec!["test"]);
 
         // Headings
         assert_eq!(result.headings.len(), 2);
@@ -752,5 +827,49 @@ See <https://auto.link> for more.
         let (fm, start) = extract_frontmatter(source);
         assert_eq!(fm.as_deref().unwrap(), "title: Test");
         assert_eq!(&source[start..], "# body");
+    }
+
+    // ── extract_tags_from_frontmatter ────────────────
+
+    #[test]
+    fn extract_tags_yaml_sequence() {
+        let tags = extract_tags_from_frontmatter(Some("tags:\n  - rust\n  - markdown"));
+        assert_eq!(tags, vec!["rust", "markdown"]);
+    }
+
+    #[test]
+    fn extract_tags_yaml_flow() {
+        let tags = extract_tags_from_frontmatter(Some("tags: [rust, markdown]"));
+        assert_eq!(tags, vec!["rust", "markdown"]);
+    }
+
+    #[test]
+    fn extract_tags_yaml_single() {
+        let tags = extract_tags_from_frontmatter(Some("tags: justone"));
+        assert_eq!(tags, vec!["justone"]);
+    }
+
+    #[test]
+    fn extract_tags_none() {
+        let tags = extract_tags_from_frontmatter(None);
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn extract_tags_empty_string() {
+        let tags = extract_tags_from_frontmatter(Some(""));
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn extract_tags_no_tags_key() {
+        let tags = extract_tags_from_frontmatter(Some("title: Hello"));
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn extract_tags_invalid_yaml() {
+        let tags = extract_tags_from_frontmatter(Some("tags: [unclosed"));
+        assert!(tags.is_empty());
     }
 }
