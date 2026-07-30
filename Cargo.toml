@@ -5,12 +5,16 @@ edition = "2024"
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite_migration = { version = "2", features = ["from-directory"] }
+include_dir = "0.7"
 pulldown-cmark = "0.13"
 notify = "8"
 notify-debouncer-full = "0.7"
 serde = { version = "1", features = ["derive"] }
 yaml_serde = "0.10"
+chrono = "0.4"
 sha2 = "0.11"
+hex = "0.4"
 ignore = "0.4"
 log = "0.4"
 

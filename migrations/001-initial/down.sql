@@ -1,0 +1,10 @@
+DROP INDEX IF EXISTS idx_tags_tag;
+DROP INDEX IF EXISTS idx_tags_file;
+DROP INDEX IF EXISTS idx_links_file;
+DROP INDEX IF EXISTS idx_headings_file;
+
+DROP TABLE IF EXISTS fts;
+DROP TABLE IF EXISTS tags;
+DROP TABLE IF EXISTS links;
+DROP TABLE IF EXISTS headings;
+DROP TABLE IF EXISTS files;
