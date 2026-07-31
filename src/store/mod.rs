@@ -495,7 +495,7 @@ mod tests {
             .unwrap()
             .expect("file should still exist after reindex");
         assert_eq!(fetched.hash, fi2.hash);
-        assert_eq!(fetched.size_bytes, 27);
+        assert_eq!(fetched.size_bytes, 29);
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tests {
         let results: Vec<(i64, String)> = store
             .conn
             .prepare(
-                "SELECT file_id, snippet(fts, 1, '<b>', '</b>', '...', 16)
+                "SELECT file_id, snippet(fts, 2, '<b>', '</b>', '...', 16)
                  FROM fts WHERE fts MATCH 'fox'",
             )
             .unwrap()

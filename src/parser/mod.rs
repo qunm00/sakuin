@@ -44,10 +44,9 @@ impl Parser {
         let mut anchor_counts: HashSet<String> = HashSet::new();
 
         // State machine for tracking nested tag context.
-        // We need to track heading text (text between Start(Heading) and End(Heading))
-        // and link text (text between Start(Link) and End(Link)).
         let mut in_heading: Option<(u8, Vec<String>, usize)> = None;
         let mut in_link: Option<(LinkType, String, Vec<String>, usize)> = None;
+        let mut in_image: Option<(String, Vec<String>, usize)> = None;
 
         for event in parser {
             match event {
@@ -93,12 +92,8 @@ impl Parser {
                         dest_url,
                         ..
                     } => {
-                        links.push(Link {
-                            link_type: LinkType::Image,
-                            target: dest_url.to_string(),
-                            text: None,
-                            position: content_start, // placeholder
-                        });
+                        let position = content_start; // placeholder
+                        in_image = Some((dest_url.to_string(), Vec::new(), position));
                     }
 
                     _ => {}
@@ -107,6 +102,7 @@ impl Parser {
                 pulldown_cmark::Event::End(tag_end) => match tag_end {
                     pulldown_cmark::TagEnd::Heading(..) => {
                         if let Some((level, text_parts, position)) = in_heading.take() {
+                            println!("Heading end: level {}, text_parts: {:?}", level, text_parts);
                             let raw_text = text_parts.concat();
                             let text = raw_text.trim().to_string();
                             if !text.is_empty() {
@@ -121,9 +117,29 @@ impl Parser {
                         }
                     }
 
+                    pulldown_cmark::TagEnd::Image => {
+                        if let Some((target, text_parts, position)) = in_image.take() {
+                            let text = if text_parts.is_empty() {
+                                None
+                            } else {
+                                Some(text_parts.concat())
+                            };
+                            links.push(Link {
+                                link_type: LinkType::Image,
+                                target,
+                                text,
+                                position,
+                            });
+                        }
+                    }
+
                     pulldown_cmark::TagEnd::Link => {
                         if let Some((link_type, target, text_parts, position)) = in_link.take() {
-                            let text = if text_parts.is_empty() {
+                            // Autolinks (e.g. `<https://example.com>`) have no separate
+                            // display text — the URL is both target and text.
+                            let text = if matches!(link_type, LinkType::Autolink) {
+                                None
+                            } else if text_parts.is_empty() {
                                 None
                             } else {
                                 Some(text_parts.concat())
@@ -148,13 +164,20 @@ impl Parser {
                         text_parts.push(text_str.clone());
                     }
                     if let Some((_, _, ref mut text_parts, _)) = in_link {
-                        text_parts.push(text_str);
+                        text_parts.push(text_str.clone());
+                    }
+                    if let Some((_, ref mut text_parts, _)) = in_image {
+                        text_parts.push(text_str.clone());
                     }
                 }
 
                 pulldown_cmark::Event::Code(text) => {
                     let code_text = text.to_string();
-                    body_parts.push(code_text);
+                    body_parts.push(code_text.clone());
+                    
+                    if let Some((_, ref mut text_parts, _)) = in_heading {
+                        text_parts.push(code_text.clone());
+                    }
                 }
 
                 pulldown_cmark::Event::SoftBreak | pulldown_cmark::Event::HardBreak => {
@@ -187,6 +210,19 @@ impl Parser {
             };
             links.push(Link {
                 link_type,
+                target,
+                text,
+                position,
+            });
+        }
+        if let Some((target, text_parts, position)) = in_image {
+            let text = if text_parts.is_empty() {
+                None
+            } else {
+                Some(text_parts.concat())
+            };
+            links.push(Link {
+                link_type: LinkType::Image,
                 target,
                 text,
                 position,
