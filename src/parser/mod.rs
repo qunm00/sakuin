@@ -102,7 +102,6 @@ impl Parser {
                 pulldown_cmark::Event::End(tag_end) => match tag_end {
                     pulldown_cmark::TagEnd::Heading(..) => {
                         if let Some((level, text_parts, position)) = in_heading.take() {
-                            println!("Heading end: level {}, text_parts: {:?}", level, text_parts);
                             let raw_text = text_parts.concat();
                             let text = raw_text.trim().to_string();
                             if !text.is_empty() {
