@@ -31,15 +31,15 @@
 - [x] Wikilink support (`[[target]]` and `[[target|label]]`).
 - [x] Write unit tests for parser against known Markdown samples.
 
-### Phase 2 — SQLite storage
+### Phase 2 — SQLite storage ✅
 
-- [ ] Implement `IndexStore` — schema creation, CRUD for files, headings,
+- [x] Implement `IndexStore` — schema creation, CRUD for files, headings,
       links, tags.
-- [ ] Implement FTS5 table and text indexing.
-- [ ] Write integration tests: index a sample workspace, query it, verify
+- [x] Implement FTS5 table and text indexing.
+- [x] Write integration tests: index a sample workspace, query it, verify
       results match expected values.
 
-### ⚠️ Pre-Phase 3 — Parser tags extraction
+### ⚠️ Pre-Phase 3 — Parser tags extraction ✅
 
 - [x] Add `tags: Vec<String>` field to `ParseResult` so callers don't have
       to parse frontmatter themselves.
