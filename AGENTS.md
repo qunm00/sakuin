@@ -10,6 +10,9 @@
 - Documentation is split into `docs/design.md` (architecture & design) and `docs/plan.md` (implementation roadmap).
 - Core dependencies: `rusqlite` (bundled SQLite), `pulldown-cmark` (Markdown parsing), `notify` + `notify-debouncer-full` (file watching), `serde` + `yaml_serde` (frontmatter), `sha2` + `hex` (hashing), `chrono` (timestamps), `rusqlite_migration` (migrations), `ignore`, `log`.
 - SQLite schema includes tables: `files` (with `relative_path`, `absolute_path`, `hash`, `frontmatter`, `size_bytes`, `modified_at`, `indexed_at`), `headings` (level, text, anchor, position), `links` (link_type, target, anchor, text, position), `tags` (tag), and an FTS5 virtual table `fts` (file_id, title, body).
+- `IndexStore` writes per file via `set_headings`/`set_links`/`set_tags`/`set_fts`; each method deletes the file's old rows and inserts fresh ones in the same transaction.
+- The `links.link_type` column stores lowercase strings (`inline`, `reference`, `wikilink`, `autolink`, `image`), serialized via `LinkType::as_str()` and parsed back by the shared `pub(crate) link_type_from_str` used by both store and query.
+- Query filters treat `None` as "no filter" (e.g. `files(None)` for all files, not `"*"`); optional filters use the SQLite idiom `WHERE (?1 IS NULL OR column = ?1)`.
 - Schema migrations are SQL files in `migrations/`, embedded at compile time via `include_dir` and applied with `rusqlite_migration`; connections open in WAL mode with `foreign_keys=ON`.
 - Module structure under `src/`: `scanner`, `parser/` (`mod.rs`, `helpers.rs`), `store/` (`mod.rs`, `helpers.rs`, `migration.rs`), `query`, `watcher`, `indexer`.
 - Example binary at `examples/basic-index.rs` showing the intended usage flow.
@@ -30,6 +33,7 @@
 - **Wikilinks**: Uses pulldown-cmark 0.13's native wikilink support via `Options::ENABLE_WIKILINKS`. The parser emits `Tag::Link` with `LinkType::WikiLink { has_pothole: bool }` for `[[target]]` and `[[target|label]]` patterns. No pre-processing needed.
 - **Headings**: Collects from `Tag::Heading` events. Handles ATX and setext headings (via pulldown-cmark). Text is concatenated from nested `Text`/`Code` events (strips formatting markers).
 - **Links**: Collects from `Tag::Link` and `Tag::Image` events. Converts pulldown-cmark `LinkType` to local `LinkType` enum (Inline, Reference, Autolink, Image, Wikilink).
+- **Positions**: `position` fields on headings/links are absolute byte offsets into the original file; pulldown-cmark's `into_offset_iter()` ranges are relative to the frontmatter-stripped body slice, so offsets are computed as `content_start + range.start`.
 - **Body text**: Concatenates all `Text`, `Code`, `SoftBreak`, `HardBreak` events for FTS.
 - **Anchor slug generation**: GitHub-compatible algorithm: lowercase, strip HTML tags, replace non-alphanumeric with hyphens, collapse hyphens, trim, deduplicate with `-1`, `-2`, etc.
 - Public types: `ParseResult`, `Heading`, `Link`, `LinkType`.
