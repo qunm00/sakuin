@@ -1,6 +1,9 @@
-pub mod scanner;
-pub mod parser;
-pub mod store;
-pub mod query;
-pub mod watcher;
 pub mod indexer;
+pub mod parser;
+pub mod query;
+pub mod scanner;
+pub mod store;
+pub mod watcher;
+
+pub use query::LinkType;
+pub use query::{FileEntry, HeadingEntry, LinkEntry, LinkFilter, Query, SearchResult};

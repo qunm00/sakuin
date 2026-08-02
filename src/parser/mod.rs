@@ -14,6 +14,7 @@ use std::collections::HashSet;
 /// - Standard inline links, reference links, autolinks, and images
 /// - Wikilinks (`[[target]]` and `[[target|label]]`)
 /// - Full-text body extraction
+#[derive(Default)]
 pub struct Parser;
 
 impl Parser {
@@ -36,7 +37,10 @@ impl Parser {
         // patterns are natively parsed into Tag::Link with LinkType::WikiLink.
         let mut options = pulldown_cmark::Options::empty();
         options.insert(pulldown_cmark::Options::ENABLE_WIKILINKS);
-        let parser = pulldown_cmark::Parser::new_ext(body_source, options);
+        // Use offset iteration so each event carries its byte range in
+        // `body_source`; positions are stored as absolute offsets in the
+        // original source (`content_start + range.start`).
+        let parser = pulldown_cmark::Parser::new_ext(body_source, options).into_offset_iter();
 
         let mut headings: Vec<Heading> = Vec::new();
         let mut links: Vec<Link> = Vec::new();
@@ -48,12 +52,10 @@ impl Parser {
         let mut in_link: Option<(LinkType, String, Vec<String>, usize)> = None;
         let mut in_image: Option<(String, Vec<String>, usize)> = None;
 
-        for event in parser {
+        for (event, range) in parser {
             match event {
                 pulldown_cmark::Event::Start(tag) => match tag {
-                    pulldown_cmark::Tag::Heading {
-                        level, ..
-                    } => {
+                    pulldown_cmark::Tag::Heading { level, .. } => {
                         let numeric_level = match level {
                             pulldown_cmark::HeadingLevel::H1 => 1,
                             pulldown_cmark::HeadingLevel::H2 => 2,
@@ -62,10 +64,9 @@ impl Parser {
                             pulldown_cmark::HeadingLevel::H5 => 5,
                             pulldown_cmark::HeadingLevel::H6 => 6,
                         };
-                        // Estimate position: use the byte offset from the processed source.
-                        // For simplicity we approximate; precise offset tracking can be
-                        // added in a later phase.
-                        let position = content_start; // placeholder — improved in follow-up
+                        // `range` is relative to `body_source`; add `content_start`
+                        // to get the absolute byte offset in the original file.
+                        let position = content_start + range.start;
                         in_heading = Some((numeric_level, Vec::new(), position));
                     }
 
@@ -74,16 +75,16 @@ impl Parser {
                         dest_url,
                         ..
                     } => {
-                        let (our_type, target) = if matches!(
-                            link_type,
-                            pulldown_cmark::LinkType::WikiLink { .. }
-                        ) {
-                            (LinkType::Wikilink, dest_url.to_string())
-                        } else {
-                            let our_type = convert_link_type(&link_type);
-                            (our_type, dest_url.to_string())
-                        };
-                        let position = content_start; // placeholder
+                        let (our_type, target) =
+                            if matches!(link_type, pulldown_cmark::LinkType::WikiLink { .. }) {
+                                (LinkType::Wikilink, dest_url.to_string())
+                            } else {
+                                let our_type = convert_link_type(&link_type);
+                                (our_type, dest_url.to_string())
+                            };
+                        // `range` is relative to `body_source`; add `content_start`
+                        // to get the absolute byte offset in the original file.
+                        let position = content_start + range.start;
                         in_link = Some((our_type, target, Vec::new(), position));
                     }
 
@@ -92,7 +93,9 @@ impl Parser {
                         dest_url,
                         ..
                     } => {
-                        let position = content_start; // placeholder
+                        // `range` is relative to `body_source`; add `content_start`
+                        // to get the absolute byte offset in the original file.
+                        let position = content_start + range.start;
                         in_image = Some((dest_url.to_string(), Vec::new(), position));
                     }
 
@@ -136,9 +139,9 @@ impl Parser {
                         if let Some((link_type, target, text_parts, position)) = in_link.take() {
                             // Autolinks (e.g. `<https://example.com>`) have no separate
                             // display text — the URL is both target and text.
-                            let text = if matches!(link_type, LinkType::Autolink) {
-                                None
-                            } else if text_parts.is_empty() {
+                            let text = if matches!(link_type, LinkType::Autolink)
+                                || text_parts.is_empty()
+                            {
                                 None
                             } else {
                                 Some(text_parts.concat())
@@ -173,7 +176,7 @@ impl Parser {
                 pulldown_cmark::Event::Code(text) => {
                     let code_text = text.to_string();
                     body_parts.push(code_text.clone());
-                    
+
                     if let Some((_, ref mut text_parts, _)) = in_heading {
                         text_parts.push(code_text.clone());
                     }
@@ -419,6 +422,25 @@ mod tests {
         assert_eq!(result.headings.len(), 3);
     }
 
+    #[test]
+    fn parse_positions_are_distinct_and_increasing() {
+        // Positions must be distinct so that `UNIQUE(file_id, position)` in
+        // the store is not violated when several headings/links share a file.
+        let source =
+            "# First\n\nSee [link one](https://example.com/1) and [[page-two]].\n\n## Second\n";
+        let result = Parser::new().parse(source);
+
+        let heading_positions: Vec<usize> = result
+            .headings
+            .iter()
+            .map(|heading| heading.position)
+            .collect();
+        assert_eq!(heading_positions, [0, 66]);
+
+        let link_positions: Vec<usize> = result.links.iter().map(|link| link.position).collect();
+        assert_eq!(link_positions, [13, 51]);
+    }
+
     // ── Anchor slugs ───────────────────────────────────
 
     #[test]
@@ -513,39 +535,59 @@ mod tests {
     fn parse_wikilink_basic() {
         let source = "Link to [[target-page]] here.";
         let result = Parser::new().parse(source);
-        let wl: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).collect();
-        assert_eq!(wl.len(), 1, "expected one wikilink");
-        assert_eq!(wl[0].target, "target-page");
-        assert_eq!(wl[0].text.as_deref(), Some("target-page"));
+        let wikilinks: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Wikilink)
+            .collect();
+        assert_eq!(wikilinks.len(), 1, "expected one wikilink");
+        assert_eq!(wikilinks[0].target, "target-page");
+        assert_eq!(wikilinks[0].text.as_deref(), Some("target-page"));
     }
 
     #[test]
     fn parse_wikilink_with_alias() {
         let source = "Link to [[target|display text]] here.";
         let result = Parser::new().parse(source);
-        let wl: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).collect();
-        assert_eq!(wl.len(), 1);
-        assert_eq!(wl[0].target, "target");
-        assert_eq!(wl[0].text.as_deref(), Some("display text"));
+        let wikilinks: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Wikilink)
+            .collect();
+        assert_eq!(wikilinks.len(), 1);
+        assert_eq!(wikilinks[0].target, "target");
+        assert_eq!(wikilinks[0].text.as_deref(), Some("display text"));
     }
 
     #[test]
     fn parse_multiple_wikilinks() {
         let source = "[[page-a]] and [[page-b|label]]";
         let result = Parser::new().parse(source);
-        let wl: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).collect();
-        assert_eq!(wl.len(), 2);
-        assert_eq!(wl[0].target, "page-a");
-        assert_eq!(wl[1].target, "page-b");
+        let wikilinks: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Wikilink)
+            .collect();
+        assert_eq!(wikilinks.len(), 2);
+        assert_eq!(wikilinks[0].target, "page-a");
+        assert_eq!(wikilinks[1].target, "page-b");
     }
 
     #[test]
     fn parse_wikilinks_mixed_with_regular_links() {
         let source = "A [[wiki]] and a [normal](https://example.com) link.";
         let result = Parser::new().parse(source);
-        let wl: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).collect();
-        let normal: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Inline).collect();
-        assert_eq!(wl.len(), 1);
+        let wikilinks: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Wikilink)
+            .collect();
+        let normal: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Inline)
+            .collect();
+        assert_eq!(wikilinks.len(), 1);
         assert_eq!(normal.len(), 1);
     }
 
@@ -554,8 +596,12 @@ mod tests {
         // Empty target should be ignored
         let source = "[[]]";
         let result = Parser::new().parse(source);
-        let wl: Vec<_> = result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).collect();
-        assert!(wl.is_empty(), "empty wikilink should be ignored");
+        let wikilinks: Vec<_> = result
+            .links
+            .iter()
+            .filter(|l| l.link_type == LinkType::Wikilink)
+            .collect();
+        assert!(wikilinks.is_empty(), "empty wikilink should be ignored");
     }
 
     // ── Body text ──────────────────────────────────────
@@ -615,19 +661,35 @@ See <https://auto.link> for more.
 
         // Links
         assert_eq!(
-            result.links.iter().filter(|l| l.link_type == LinkType::Wikilink).count(),
+            result
+                .links
+                .iter()
+                .filter(|l| l.link_type == LinkType::Wikilink)
+                .count(),
             1
         );
         assert_eq!(
-            result.links.iter().filter(|l| l.link_type == LinkType::Inline).count(),
+            result
+                .links
+                .iter()
+                .filter(|l| l.link_type == LinkType::Inline)
+                .count(),
             1
         );
         assert_eq!(
-            result.links.iter().filter(|l| l.link_type == LinkType::Image).count(),
+            result
+                .links
+                .iter()
+                .filter(|l| l.link_type == LinkType::Image)
+                .count(),
             1
         );
         assert_eq!(
-            result.links.iter().filter(|l| l.link_type == LinkType::Autolink).count(),
+            result
+                .links
+                .iter()
+                .filter(|l| l.link_type == LinkType::Autolink)
+                .count(),
             1
         );
 

@@ -1,6 +1,7 @@
 ## Learned User Preferences
 
 - Don't abbreviate variable names; use full descriptive names (e.g., `relative_path` instead of `rel_path`, `absolute_path` instead of `abs_path`).
+- Never commit code without asking the user first. Always ask before running `git commit` (or any operation that creates commits).
 
 ## Learned Workspace Facts
 
@@ -41,7 +42,7 @@
 - Phase 0: ✅ (project scaffolding)
 - Phase 1: ✅ (Scanner, Parser, wikilink support, unit tests)
 - Phase 2: ✅ (IndexStore, SQLite, schema migration, FTS5, tags extraction)
-- Phase 3: ❌ (Query API)
+- Phase 3: ✅ (Query API, FTS5 search, backlinks, query tests)
 - Phase 4: ❌ (FileWatcher)
 - Phase 5: ❌ (Determinism & property tests)
 - Phase 6: ❌ (Polish & documentation)

@@ -44,12 +44,12 @@
 - [x] Add `tags: Vec<String>` field to `ParseResult` so callers don't have
       to parse frontmatter themselves.
 
-### Phase 3 — Query API
+### Phase 3 — Query API ✅
 
-- [ ] Implement all `Query` methods.
-- [ ] Implement `search()` with FTS5.
-- [ ] Implement `backlinks()`.
-- [ ] Write query tests.
+- [x] Implement all `Query` methods.
+- [x] Implement `search()` with FTS5.
+- [x] Implement `backlinks()`.
+- [x] Write query tests.
 
 ### Phase 4 — Filesystem watching
 

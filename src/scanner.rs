@@ -26,20 +26,21 @@ impl Scanner {
         let mut results = Vec::new();
 
         let walker = ignore::WalkBuilder::new(&self.root)
-            .standard_filters(true)   // respect .gitignore
-            .hidden(true)             // skip hidden files/dirs (names starting with `.`)
+            .standard_filters(true) // respect .gitignore
+            .hidden(true) // skip hidden files/dirs (names starting with `.`)
             .build();
 
         for entry in walker {
             match entry {
                 Ok(entry) => {
                     let path = entry.path();
-                    if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("md"))
+                    if path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
                         && path.is_file()
+                        && let Ok(relative) = path.strip_prefix(&self.root)
                     {
-                        if let Ok(relative) = path.strip_prefix(&self.root) {
-                            results.push(relative.to_owned());
-                        }
+                        results.push(relative.to_owned());
                     }
                 }
                 Err(err) => {
@@ -51,8 +52,14 @@ impl Scanner {
         // Stable ordering for determinism.
         results.sort_by(|a, b| {
             // Compare component-by-component for OS-independent ordering.
-            let a_components: Vec<_> = a.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect();
-            let b_components: Vec<_> = b.components().map(|c| c.as_os_str().to_ascii_lowercase()).collect();
+            let a_components: Vec<_> = a
+                .components()
+                .map(|c| c.as_os_str().to_ascii_lowercase())
+                .collect();
+            let b_components: Vec<_> = b
+                .components()
+                .map(|c| c.as_os_str().to_ascii_lowercase())
+                .collect();
             a_components.cmp(&b_components)
         });
 
@@ -81,12 +88,7 @@ mod tests {
 
     #[test]
     fn scan_finds_markdown_files() {
-        let dir = create_temp_workspace(&[
-            "hello.md",
-            "sub/dir/test.md",
-            "other.txt",
-            "readme.md",
-        ]);
+        let dir = create_temp_workspace(&["hello.md", "sub/dir/test.md", "other.txt", "readme.md"]);
         let scanner = Scanner::new(dir.path());
         let mut files = scanner.scan();
         files.sort();
@@ -99,12 +101,7 @@ mod tests {
 
     #[test]
     fn scan_skips_non_markdown() {
-        let dir = create_temp_workspace(&[
-            "index.md",
-            "style.css",
-            "main.rs",
-            "data.json",
-        ]);
+        let dir = create_temp_workspace(&["index.md", "style.css", "main.rs", "data.json"]);
         let scanner = Scanner::new(dir.path());
         let files = scanner.scan();
 
@@ -114,11 +111,7 @@ mod tests {
 
     #[test]
     fn scan_skips_hidden_files() {
-        let dir = create_temp_workspace(&[
-            "visible.md",
-            ".hidden.md",
-            ".dotdir/secret.md",
-        ]);
+        let dir = create_temp_workspace(&["visible.md", ".hidden.md", ".dotdir/secret.md"]);
         let scanner = Scanner::new(dir.path());
         let files = scanner.scan();
 
@@ -137,12 +130,7 @@ mod tests {
 
     #[test]
     fn scan_returns_sorted_paths() {
-        let dir = create_temp_workspace(&[
-            "zeta.md",
-            "alpha.md",
-            "beta.md",
-            "gamma/deep.md",
-        ]);
+        let dir = create_temp_workspace(&["zeta.md", "alpha.md", "beta.md", "gamma/deep.md"]);
         let scanner = Scanner::new(dir.path());
         let files = scanner.scan();
 

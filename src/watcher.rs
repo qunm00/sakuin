@@ -1,6 +1,12 @@
 /// Filesystem watcher for live index synchronisation.
 pub struct FileWatcher;
 
+impl Default for FileWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileWatcher {
     pub fn new() -> Self {
         Self

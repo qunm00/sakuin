@@ -108,8 +108,13 @@ pub(crate) fn consume_line_endings(s: &str) -> usize {
 pub(crate) fn convert_link_type(link_type: &pulldown_cmark::LinkType) -> super::LinkType {
     use pulldown_cmark::LinkType as PcLinkType;
     match link_type {
-        PcLinkType::Inline | PcLinkType::ReferenceUnknown | PcLinkType::ShortcutUnknown => super::LinkType::Inline,
-        PcLinkType::Reference | PcLinkType::Collapsed | PcLinkType::CollapsedUnknown | PcLinkType::Shortcut => super::LinkType::Reference,
+        PcLinkType::Inline | PcLinkType::ReferenceUnknown | PcLinkType::ShortcutUnknown => {
+            super::LinkType::Inline
+        }
+        PcLinkType::Reference
+        | PcLinkType::Collapsed
+        | PcLinkType::CollapsedUnknown
+        | PcLinkType::Shortcut => super::LinkType::Reference,
         PcLinkType::Autolink | PcLinkType::Email => super::LinkType::Autolink,
         PcLinkType::WikiLink { .. } => super::LinkType::Wikilink,
     }

@@ -1,6 +1,12 @@
 /// Top-level orchestrator tying together scanning, parsing, storage, and watching.
 pub struct Indexer;
 
+impl Default for Indexer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Indexer {
     pub fn new() -> Self {
         Self

@@ -3,7 +3,6 @@
 /// The `IndexStore` manages all CRUD operations against the SQLite database,
 /// including schema creation, file upsert/delete, and replacement of child
 /// rows (headings, links, tags, FTS entries) for a given file.
-
 mod helpers;
 mod migration;
 
@@ -138,7 +137,13 @@ impl IndexStore {
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for h in headings {
-                stmt.execute(params![file_id, h.level, h.text, h.anchor, h.position as i64])?;
+                stmt.execute(params![
+                    file_id,
+                    h.level,
+                    h.text,
+                    h.anchor,
+                    h.position as i64
+                ])?;
             }
         }
         tx.commit()?;
@@ -201,7 +206,8 @@ impl IndexStore {
         title: &str,
         body: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.conn.execute("DELETE FROM fts WHERE file_id = ?1", params![file_id])?;
+        self.conn
+            .execute("DELETE FROM fts WHERE file_id = ?1", params![file_id])?;
         self.conn.execute(
             "INSERT INTO fts (file_id, title, body) VALUES (?1, ?2, ?3)",
             params![file_id, title, body],
@@ -235,10 +241,13 @@ impl IndexStore {
     /// Look up a file's database id by `relative_path`.
     ///
     /// Returns `None` if the file does not exist in the index.
-    pub fn get_file_id(&self, relative_path: &str) -> Result<Option<i64>, Box<dyn std::error::Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id FROM files WHERE relative_path = ?1",
-        )?;
+    pub fn get_file_id(
+        &self,
+        relative_path: &str,
+    ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM files WHERE relative_path = ?1")?;
         let mut rows = stmt.query(params![relative_path])?;
         match rows.next()? {
             Some(row) => Ok(Some(row.get(0)?)),
@@ -310,10 +319,7 @@ impl IndexStore {
     }
 
     /// Retrieve all links for a file, ordered by position.
-    pub fn get_links_by_file(
-        &self,
-        file_id: i64,
-    ) -> Result<Vec<Link>, Box<dyn std::error::Error>> {
+    pub fn get_links_by_file(&self, file_id: i64) -> Result<Vec<Link>, Box<dyn std::error::Error>> {
         let mut stmt = self.conn.prepare(
             "SELECT link_type, target, text, position FROM links
              WHERE file_id = ?1 ORDER BY position",
@@ -321,7 +327,7 @@ impl IndexStore {
         let rows = stmt.query_map(params![file_id], |row| -> Result<Link, rusqlite::Error> {
             let link_type_str: String = row.get(0)?;
             let link_type = link_type_from_str(&link_type_str)
-                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                .map_err(rusqlite::Error::InvalidParameterName)?;
             Ok(Link {
                 link_type,
                 target: row.get(1)?,
@@ -337,25 +343,34 @@ impl IndexStore {
         &self,
         file_id: i64,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tag FROM tags WHERE file_id = ?1 ORDER BY tag",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT tag FROM tags WHERE file_id = ?1 ORDER BY tag")?;
         let rows = stmt.query_map(params![file_id], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Return a read-only [`Query`](crate::query::Query) handle over this
+    /// store's connection.
+    ///
+    /// The handle borrows the store, so no mutations can be performed while
+    /// it is alive.
+    pub fn query(&self) -> crate::query::Query<'_> {
+        crate::query::Query::new(&self.conn)
     }
 }
 
 // ── Helper: LinkType deserialization ─────────────────
 
 /// Convert a SQLite link_type string back into a `LinkType`.
-fn link_type_from_str(s: &str) -> Result<LinkType, Box<dyn std::error::Error>> {
+pub(crate) fn link_type_from_str(s: &str) -> Result<LinkType, String> {
     match s {
         "inline" => Ok(LinkType::Inline),
         "reference" => Ok(LinkType::Reference),
         "wikilink" => Ok(LinkType::Wikilink),
         "autolink" => Ok(LinkType::Autolink),
         "image" => Ok(LinkType::Image),
-        other => Err(format!("unknown link_type: {other}").into()),
+        other => Err(format!("unknown link_type: {other}")),
     }
 }
 
@@ -436,10 +451,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        assert_eq!(
-            first_open, second_open,
-            "schema changed after second open"
-        );
+        assert_eq!(first_open, second_open, "schema changed after second open");
     }
 
     // ── Files: upsert and query ──────────────────────
@@ -505,12 +517,8 @@ mod tests {
         let mut store = IndexStore::open(&db_path).unwrap();
 
         for name in &["b.md", "a.md", "c.md"] {
-            let fi = FileInfo::from_content(
-                name.to_string(),
-                format!("/tmp/{name}"),
-                b"content",
-                None,
-            );
+            let fi =
+                FileInfo::from_content(name.to_string(), format!("/tmp/{name}"), b"content", None);
             store.upsert_file(&fi).unwrap();
         }
 
@@ -584,34 +592,44 @@ mod tests {
 
         // Set two headings first
         store
-            .set_headings(file_id, &[
-                Heading {
-                    level: 1,
-                    text: "First".to_string(),
-                    anchor: "first".to_string(),
-                    position: 0,
-                },
-                Heading {
-                    level: 2,
-                    text: "Second".to_string(),
-                    anchor: "second".to_string(),
-                    position: 10,
-                },
-            ])
+            .set_headings(
+                file_id,
+                &[
+                    Heading {
+                        level: 1,
+                        text: "First".to_string(),
+                        anchor: "first".to_string(),
+                        position: 0,
+                    },
+                    Heading {
+                        level: 2,
+                        text: "Second".to_string(),
+                        anchor: "second".to_string(),
+                        position: 10,
+                    },
+                ],
+            )
             .unwrap();
 
         // Replace with a single heading — proves old ones are deleted, not just overwritten
         store
-            .set_headings(file_id, &[Heading {
-                level: 1,
-                text: "Replacement".to_string(),
-                anchor: "replacement".to_string(),
-                position: 0,
-            }])
+            .set_headings(
+                file_id,
+                &[Heading {
+                    level: 1,
+                    text: "Replacement".to_string(),
+                    anchor: "replacement".to_string(),
+                    position: 0,
+                }],
+            )
             .unwrap();
 
         let stored = store.get_headings_by_file(file_id).unwrap();
-        assert_eq!(stored.len(), 1, "expected only one heading after replacement");
+        assert_eq!(
+            stored.len(),
+            1,
+            "expected only one heading after replacement"
+        );
         assert_eq!(stored[0].text, "Replacement");
     }
 
@@ -681,9 +699,7 @@ mod tests {
         assert!(stored.contains(&"markdown".to_string()));
 
         // Replace
-        store
-            .set_tags(file_id, &["updated".to_string()])
-            .unwrap();
+        store.set_tags(file_id, &["updated".to_string()]).unwrap();
         let stored2 = store.get_tags_by_file(file_id).unwrap();
         assert_eq!(stored2, vec!["updated"]);
     }
@@ -705,7 +721,11 @@ mod tests {
         let file_id = store.upsert_file(&fi).unwrap();
 
         store
-            .set_fts(file_id, "My Title", "The quick brown fox jumps over the lazy dog.")
+            .set_fts(
+                file_id,
+                "My Title",
+                "The quick brown fox jumps over the lazy dog.",
+            )
             .unwrap();
 
         let results: Vec<(i64, String)> = store
@@ -742,12 +762,15 @@ mod tests {
         let file_id = store.upsert_file(&fi).unwrap();
 
         store
-            .set_headings(file_id, &[Heading {
-                level: 1,
-                text: "Test".to_string(),
-                anchor: "test".to_string(),
-                position: 0,
-            }])
+            .set_headings(
+                file_id,
+                &[Heading {
+                    level: 1,
+                    text: "Test".to_string(),
+                    anchor: "test".to_string(),
+                    position: 0,
+                }],
+            )
             .unwrap();
         store.set_tags(file_id, &["tag1".to_string()]).unwrap();
         store.set_fts(file_id, "Test", "body").unwrap();
@@ -792,7 +815,14 @@ mod tests {
             .unwrap_or(relative_path);
 
         store
-            .index_file(&file_info, &result.headings, &result.links, &tags, title, &result.body)
+            .index_file(
+                &file_info,
+                &result.headings,
+                &result.links,
+                &tags,
+                title,
+                &result.body,
+            )
             .unwrap();
 
         // Verify stored data
@@ -819,9 +849,18 @@ mod tests {
         // Create 4 markdown files
         let files: Vec<(&str, &str)> = vec![
             ("index.md", "# Home\n\nWelcome to [[docs]]."),
-            ("docs.md", "---\ntags: [documentation]\n---\n\n# Docs\n\nSee [[index]] for home."),
-            ("about.md", "---\ntags: [meta]\n---\n\n# About\n\nNo outgoing links."),
-            ("draft.md", "---\ntags: [wip, draft]\n---\n\n# Draft\n\nUnfinished."),
+            (
+                "docs.md",
+                "---\ntags: [documentation]\n---\n\n# Docs\n\nSee [[index]] for home.",
+            ),
+            (
+                "about.md",
+                "---\ntags: [meta]\n---\n\n# About\n\nNo outgoing links.",
+            ),
+            (
+                "draft.md",
+                "---\ntags: [wip, draft]\n---\n\n# Draft\n\nUnfinished.",
+            ),
         ];
 
         for (name, content) in &files {
