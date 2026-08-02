@@ -1,18 +1,20 @@
 ## Learned User Preferences
 
-- Don't abbreviate variable names; use full descriptive names (e.g., `relative_path` instead of `rel_path`, `absolute_path` instead of `abs_path`).
+- Don't abbreviate variable names; use full descriptive names (e.g., `relative_path` instead of `rel_path`, `absolute_path` instead of `abs_path`, `wikilinks` instead of `wl`).
 - Never commit code without asking the user first. Always ask before running `git commit` (or any operation that creates commits).
+- Delegate the continual-learning memory update to a subagent instead of running it in the main context.
 
 ## Learned Workspace Facts
 
 - Sakuin is a Rust library (not a binary crate) for indexing Markdown workspaces into a SQLite database.
 - Documentation is split into `docs/design.md` (architecture & design) and `docs/plan.md` (implementation roadmap).
-- Core dependencies: `rusqlite` (bundled SQLite), `pulldown-cmark` (Markdown parsing), `notify` (file watching), `serde`/`serde_yaml`, `sha2`, `ignore`, `log`.
+- Core dependencies: `rusqlite` (bundled SQLite), `pulldown-cmark` (Markdown parsing), `notify` + `notify-debouncer-full` (file watching), `serde` + `yaml_serde` (frontmatter), `sha2` + `hex` (hashing), `chrono` (timestamps), `rusqlite_migration` (migrations), `ignore`, `log`.
 - SQLite schema includes tables: `files` (with `relative_path`, `absolute_path`, `hash`, `frontmatter`, `size_bytes`, `modified_at`, `indexed_at`), `headings` (level, text, anchor, position), `links` (link_type, target, anchor, text, position), `tags` (tag), and an FTS5 virtual table `fts` (file_id, title, body).
-- Module structure: `scanner`, `parser`, `store`, `query`, `watcher`, `indexer` under `src/`.
+- Schema migrations are SQL files in `migrations/`, embedded at compile time via `include_dir` and applied with `rusqlite_migration`; connections open in WAL mode with `foreign_keys=ON`.
+- Module structure under `src/`: `scanner`, `parser/` (`mod.rs`, `helpers.rs`), `store/` (`mod.rs`, `helpers.rs`, `migration.rs`), `query`, `watcher`, `indexer`.
 - Example binary at `examples/basic-index.rs` showing the intended usage flow.
 - CI pipeline runs on GitHub Actions: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --all-targets`, `cargo test` on push/PR to `main`.
-- `.pi/state/` is gitignored; `AGENTS.md` is committed as shared agent knowledge.
+- Session transcripts (JSONL) live in `.pi/sessions/` and the processed-session index in `.pi/state/continual-learning-index.json`; `.pi/` is gitignored, while `AGENTS.md` is committed as shared agent knowledge.
 
 ## Phase 1 Implementation Details
 
