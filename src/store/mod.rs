@@ -6,9 +6,9 @@
 mod helpers;
 mod migration;
 
-use migration::new_migrations;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use migration::new_migrations;
+use rusqlite::{Connection, params};
 use std::path::Path;
 
 use crate::parser::{Heading, Link, LinkType};
