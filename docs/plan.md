@@ -51,11 +51,11 @@
 - [x] Implement `backlinks()`.
 - [x] Write query tests.
 
-### Phase 4 — Filesystem watching
+### Phase 4 — Filesystem watching ✅
 
-- [ ] Implement `FileWatcher` using `notify`.
-- [ ] Implement incremental update logic.
-- [ ] Test with simulated filesystem events (`tempfile`).
+- [x] Implement `FileWatcher` using `notify`.
+- [x] Implement incremental update logic.
+- [x] Test with simulated filesystem events (`tempfile`).
 
 ### Phase 5 — Determinism & correctness
 

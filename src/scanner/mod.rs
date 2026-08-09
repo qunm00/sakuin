@@ -1,3 +1,4 @@
+use crate::helpers::sort_relative_paths;
 use std::path::{Path, PathBuf};
 /// Recursively walks a directory tree and yields relative paths of `.md` files.
 ///
@@ -23,9 +24,24 @@ impl Scanner {
     /// Hidden files and directories (names starting with `.`) are skipped.
     /// The returned list is sorted alphabetically for determinism.
     pub fn scan(&self) -> Vec<PathBuf> {
+        self.walk(&self.root)
+    }
+
+    /// Walk the subtree at `relative_path` and return workspace-relative
+    /// paths to `.md` files beneath it.
+    ///
+    /// Uses the same ignore rules (`.gitignore`, hidden files) and ordering
+    /// as [`Scanner::scan`], so incremental indexing matches a full scan.
+    pub fn scan_under(&self, relative_path: &Path) -> Vec<PathBuf> {
+        self.walk(&self.root.join(relative_path))
+    }
+
+    /// Shared walk: collect `.md` file paths under `walk_root`, made
+    /// relative to the scanner's root and sorted deterministically.
+    fn walk(&self, walk_root: &Path) -> Vec<PathBuf> {
         let mut results = Vec::new();
 
-        let walker = ignore::WalkBuilder::new(&self.root)
+        let walker = ignore::WalkBuilder::new(walk_root)
             .standard_filters(true) // respect .gitignore
             .hidden(true) // skip hidden files/dirs (names starting with `.`)
             .build();
@@ -50,22 +66,12 @@ impl Scanner {
         }
 
         // Stable ordering for determinism.
-        results.sort_by(|a, b| {
-            // Compare component-by-component for OS-independent ordering.
-            let a_components: Vec<_> = a
-                .components()
-                .map(|c| c.as_os_str().to_ascii_lowercase())
-                .collect();
-            let b_components: Vec<_> = b
-                .components()
-                .map(|c| c.as_os_str().to_ascii_lowercase())
-                .collect();
-            a_components.cmp(&b_components)
-        });
+        sort_relative_paths(&mut results);
 
         results
     }
 }
+
 
 #[cfg(test)]
 mod tests {
