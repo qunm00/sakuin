@@ -74,7 +74,6 @@ impl Scanner {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
