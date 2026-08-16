@@ -112,7 +112,12 @@
 - **Larger-file streaming** — Use `pulldown-cmark`'s streaming API for files
   too large to fit in memory (rare for Markdown, but possible).
 - **Rebuild from FTS content** — If the raw files are lost, reconstruct a
-  searchable index from the stored FTS data (privacy-sensitive, opt-in).
+  searchable index from the stored FTS data (privacy-sensitive, opt-in). Only
+  works for files that are still in the index, since `delete_file` now removes
+  the FTS row along with the `files` row — so a file deleted from the index
+  (including by the watcher when its source file is lost) has no recoverable
+  content. Making this a true content backup would require keeping FTS rows as
+  tombstones on delete, which conflicts with the FTS orphan cleanup.
 - **Language detection in fenced code blocks** — Skip or index code blocks
   based on language for smarter search.
 
