@@ -53,7 +53,7 @@ fn bench_full_reindex(c: &mut Criterion) {
                 Indexer::open(workspace.path(), &db).unwrap()
             },
             |mut indexer| {
-                black_box(indexer.scan_full().unwrap());
+                indexer.scan_full().unwrap();
             },
             BatchSize::SmallInput,
         )
