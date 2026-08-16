@@ -2,6 +2,11 @@
 name = "sakuin"
 version = "0.1.0"
 edition = "2024"
+description = "Index a workspace of Markdown files into a single SQLite database with live filesystem watching"
+license = "MIT"
+repository = "https://github.com/qunm00/sakuin"
+keywords = ["markdown", "sqlite", "index", "full-text-search", "wikilinks"]
+categories = ["database", "text-processing"]
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
