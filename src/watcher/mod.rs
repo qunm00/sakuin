@@ -10,9 +10,9 @@
 //! (e.g. "rescan this subtree" vs "re-index this single file") are left to
 //! the consumer, [`crate::indexer::Indexer`].
 
+use notify::RecursiveMode;
 use notify::event::{EventKind, ModifyKind, RenameMode};
-use notify::{RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
