@@ -34,13 +34,13 @@ Add Sakuin to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-sakuin = "0.1"
+sakuin-md = "0.1"
 ```
 
 Open an index for a workspace and do a full scan:
 
 ```rust
-use sakuin::indexer::Indexer;
+use sakuin_md::indexer::Indexer;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Keep the index live while the workspace changes:
 
 ```rust
-use sakuin::indexer::Indexer;
+use sakuin_md::indexer::Indexer;
 use std::path::Path;
 use std::time::Duration;
 
@@ -80,9 +80,9 @@ $ cargo run --example basic-index
 `Query` gives you read-only, typed access to the index:
 
 ```rust
-use sakuin::indexer::Indexer;
-use sakuin::LinkFilter;
-use sakuin::parser::LinkType;
+use sakuin_md::indexer::Indexer;
+use sakuin_md::LinkFilter;
+use sakuin_md::parser::LinkType;
 use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -5,8 +5,8 @@
 //! workspace should cost roughly N times a single incremental update.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use sakuin::indexer::Indexer;
-use sakuin::watcher::WatchEvent;
+use sakuin_md::indexer::Indexer;
+use sakuin_md::watcher::WatchEvent;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 

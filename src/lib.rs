@@ -20,7 +20,7 @@
 //! use std::time::Duration;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut indexer = sakuin::indexer::Indexer::open(Path::new("."), Path::new("sakuin.db"))?;
+//! let mut indexer = sakuin_md::indexer::Indexer::open(Path::new("."), Path::new("sakuin.db"))?;
 //! indexer.scan_full()?;
 //! indexer.listen()?;
 //!

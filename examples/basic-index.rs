@@ -6,7 +6,7 @@ use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Open (or create) an index database for the current workspace.
-    let mut indexer = sakuin::indexer::Indexer::open(Path::new("."), Path::new("sakuin.db"))?;
+    let mut indexer = sakuin_md::indexer::Indexer::open(Path::new("."), Path::new("sakuin.db"))?;
 
     // 2. Full re-index: scan the workspace and index every Markdown file.
     indexer.scan_full()?;

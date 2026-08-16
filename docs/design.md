@@ -63,9 +63,9 @@ same scanning, parsing, and indexing logic.
 │  (notebook, wiki, doc-gen, …)                           │
 └──────────────────┬──────────────────────────────────────┘
                    │
-                   │  sakuin::Indexer
-                   │  sakuin::Query
-                   │  sakuin::Event
+                   │  sakuin_md::Indexer
+                   │  sakuin_md::Query
+                   │  sakuin_md::Event
                    ▼
 ┌──────────────────────────────────────────────────────────┐
 │                       Sakuin                             │
