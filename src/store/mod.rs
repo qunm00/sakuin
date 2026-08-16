@@ -112,12 +112,23 @@ impl IndexStore {
     }
 
     /// Delete the file identified by `relative_path` and all of its child
-    /// rows (headings, links, tags, FTS entry) via `ON DELETE CASCADE`.
+    /// rows.
+    ///
+    /// Headings, links, and tags are removed via `ON DELETE CASCADE`. The FTS
+    /// row is removed explicitly since FTS5 does not support `ON DELETE
+    /// CASCADE`; without this, deleted-then-recreated files would leak stale
+    /// `fts` rows that could reattach to a reused `file_id`.
     pub fn delete_file(&mut self, relative_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM fts WHERE file_id IN (SELECT id FROM files WHERE relative_path = ?1)",
+            params![relative_path],
+        )?;
+        tx.execute(
             "DELETE FROM files WHERE relative_path = ?1",
             params![relative_path],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -762,6 +773,53 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, file_id);
         assert!(results[0].1.contains("fox"));
+    }
+
+    #[test]
+    fn delete_file_removes_fts_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut store = IndexStore::open(&db_path).unwrap();
+
+        let count_fts_rows = |store: &IndexStore| -> i64 {
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM fts", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        let fi = FileInfo::from_content("a.md".to_string(), "/tmp/a.md".to_string(), b"", None);
+        let file_id = store.upsert_file(&fi).unwrap();
+        store.set_fts(file_id, "Title A", "body A").unwrap();
+        assert_eq!(count_fts_rows(&store), 1);
+
+        store.delete_file("a.md").unwrap();
+
+        // FTS5 cannot cascade, so delete_file must clean up the FTS row
+        // explicitly rather than leaving an orphan behind.
+        assert_eq!(
+            count_fts_rows(&store),
+            0,
+            "delete_file left an orphaned fts row behind"
+        );
+
+        // Recreate a file. SQLite may reuse the old rowid, in which case a
+        // stale orphan would silently reattach to the new file's id.
+        let fi2 = FileInfo::from_content("b.md".to_string(), "/tmp/b.md".to_string(), b"", None);
+        let file_id2 = store.upsert_file(&fi2).unwrap();
+        store.set_fts(file_id2, "Title B", "body B").unwrap();
+
+        // The FTS table must hold exactly one row per file_id.
+        let duplicate_file_ids: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM (SELECT file_id FROM fts GROUP BY file_id HAVING COUNT(*) > 1)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_file_ids, 0, "multiple fts rows for one file_id");
+        assert_eq!(count_fts_rows(&store), 1);
     }
 
     // ── Cascade delete ──────────────────────────────
