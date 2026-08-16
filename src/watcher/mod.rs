@@ -78,8 +78,7 @@ impl FileWatcher {
         let handle = thread::Builder::new()
             .name("sakuin-watcher".to_string())
             .spawn(move || {
-                let result = run_watcher_thread(&root, event_sender, stop_receiver);
-                let _ = setup_sender.send(result.map_err(|error| error.to_string()));
+                run_watcher_thread(&root, event_sender, stop_receiver, setup_sender);
             })?;
 
         // Wait for the thread to finish setting up so that initialisation
@@ -154,18 +153,21 @@ impl std::fmt::Display for WatcherStopped {
 impl std::error::Error for WatcherStopped {}
 
 /// The watcher thread's main loop: create the debounced watcher, start
-/// watching `root`, then block until told to stop. The debouncer invokes
-/// its callback on notify's internal threads; this thread only exists to
-/// keep the debouncer alive.
+/// watching `root`, signal readiness to [`FileWatcher::watch`], then block
+/// until told to stop. Initialisation failures are signalled early so that
+/// `watch()` can surface them instead of hanging. The debouncer invokes its
+/// callback on notify's internal threads; this thread only exists to keep the
+/// debouncer alive.
 fn run_watcher_thread(
     root: &Path,
     event_sender: Sender<Vec<WatchEvent>>,
     stop_receiver: Receiver<()>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    ready_sender: Sender<Result<(), String>>,
+) {
     let watch_root = root.to_owned();
     // `None` tick rate lets the debouncer pick its own (timeout/5), which is
     // the recommended default.
-    let mut debouncer = new_debouncer(
+    let mut debouncer = match new_debouncer(
         DEBOUNCE_INTERVAL,
         None,
         move |result: DebounceEventResult| {
@@ -186,12 +188,25 @@ fn run_watcher_thread(
                 let _ = event_sender.send(events);
             }
         },
-    )?;
-    debouncer.watch(root, RecursiveMode::Recursive)?;
+    ) {
+        Ok(debouncer) => debouncer,
+        Err(error) => {
+            let _ = ready_sender.send(Err(error.to_string()));
+            return;
+        }
+    };
 
-    // Block until stop() is called.
+    if let Err(error) = debouncer.watch(root, RecursiveMode::Recursive) {
+        let _ = ready_sender.send(Err(error.to_string()));
+        return;
+    }
+
+    // Signal that the watcher is started before blocking, so `watch()` can
+    // return to the caller.
+    let _ = ready_sender.send(Ok(()));
+
+    // Block until stop() is called, keeping the debouncer alive.
     let _ = stop_receiver.recv();
-    Ok(())
 }
 
 /// Translate a debounced event into [`WatchEvent`]s.
@@ -506,6 +521,24 @@ mod tests {
         collected
     }
 
+    /// Whether the given events report the deletion of `created.md`.
+    ///
+    /// macOS FSEvents reports unlinks as rename events, which the collector
+    /// translates to `Changed`; the indexer resolves the ambiguity by
+    /// checking whether the path still exists. Other platforms report the
+    /// removal as `Removed` directly.
+    fn removal_reported(events: &[WatchEvent]) -> bool {
+        let created_md = PathBuf::from("created.md");
+        if events.contains(&WatchEvent::Removed(created_md.clone())) {
+            return true;
+        }
+        cfg!(target_os = "macos")
+            && events.iter().any(|event| match event {
+                WatchEvent::Changed(path) => path == &created_md,
+                _ => false,
+            })
+    }
+
     #[test]
     fn watcher_reports_real_file_changes() {
         let dir = tempfile::tempdir().unwrap();
@@ -530,7 +563,7 @@ mod tests {
         std::fs::remove_file(&created_path).unwrap();
         let events = wait_for_events(&watcher, Duration::from_secs(5));
         assert!(
-            events.contains(&WatchEvent::Removed(PathBuf::from("created.md"))),
+            removal_reported(&events),
             "expected a remove event, got {events:?}"
         );
 

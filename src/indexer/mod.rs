@@ -138,10 +138,13 @@ impl Indexer {
     }
 
     /// Index the file at `relative_path`, or every Markdown file beneath it
-    /// when the path is a directory. Missing paths are ignored.
+    /// when the path is a directory. A missing path means the file was
+    /// removed (on macOS FSEvents reports unlinks as rename events, which
+    /// the watcher translates to `Changed`), so the entry is dropped.
     fn index_path(&mut self, relative_path: &Path) {
         let absolute_path = self.root.join(relative_path);
         if !absolute_path.exists() {
+            self.remove_from_index(relative_path);
             return;
         }
         if absolute_path.is_dir() {
@@ -335,13 +338,17 @@ mod tests {
     }
 
     #[test]
-    fn changed_event_for_missing_file_is_a_noop() {
-        let dir = create_workspace(&[("a.md", "# A")]);
+    fn changed_event_for_missing_file_removes_stale_entry() {
+        let dir = create_workspace(&[("a.md", "# A"), ("b.md", "# B")]);
         let mut indexer = Indexer::open(dir.path(), &db_path(&dir)).unwrap();
         indexer.scan_full().unwrap();
 
-        // The file was created and removed again within the debounce window.
-        indexer.apply_event(WatchEvent::Changed(PathBuf::from("ghost.md")));
+        // macOS FSEvents reports deletions as rename events, which the
+        // watcher translates to `Changed`; the consumer resolves the
+        // ambiguity by checking that the path still exists.
+        std::fs::remove_file(dir.path().join("b.md")).unwrap();
+        indexer.apply_event(WatchEvent::Changed(PathBuf::from("b.md")));
+
         assert_eq!(indexed_paths(&indexer), vec!["a.md".to_string()]);
     }
 
