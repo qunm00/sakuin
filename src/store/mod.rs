@@ -1,8 +1,8 @@
-/// SQLite-backed persistence for the index.
-///
-/// The `IndexStore` manages all CRUD operations against the SQLite database,
-/// including schema creation, file upsert/delete, and replacement of child
-/// rows (headings, links, tags, FTS entries) for a given file.
+//! SQLite-backed persistence for the index.
+//!
+//! The [`IndexStore`] manages all CRUD operations against the SQLite database,
+//! including schema creation, file upsert/delete, and replacement of child
+//! rows (headings, links, tags, FTS entries) for a given file.
 mod helpers;
 mod migration;
 
@@ -18,11 +18,17 @@ use crate::parser::{Heading, Link, LinkType};
 /// Metadata about an indexed file.
 #[derive(Debug, Clone)]
 pub struct FileInfo {
+    /// The file's path relative to the workspace root.
     pub relative_path: String,
+    /// The file's absolute path on disk.
     pub absolute_path: String,
+    /// SHA-256 hash of the file content.
     pub hash: String,
+    /// Raw YAML frontmatter, if the file had any.
     pub frontmatter: Option<String>,
+    /// Size of the file in bytes.
     pub size_bytes: u64,
+    /// Last modification time of the file (`YYYY-MM-DD HH:MM:SS`).
     pub modified_at: String,
 }
 

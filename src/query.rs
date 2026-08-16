@@ -201,41 +201,62 @@ impl<'conn> Query<'conn> {
 /// Metadata about an indexed file, as returned by the query API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
+    /// The file's database id.
     pub id: i64,
+    /// The file's path relative to the workspace root.
     pub relative_path: String,
+    /// Raw YAML frontmatter, if the file had any.
     pub frontmatter: Option<String>,
+    /// SHA-256 hash of the file content.
     pub hash: String,
+    /// Size of the file in bytes.
     pub size_bytes: i64,
+    /// When the file was last indexed (`YYYY-MM-DD HH:MM:SS` UTC).
     pub indexed_at: String,
 }
 
 /// A heading in an indexed file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadingEntry {
+    /// The heading row's database id.
     pub id: i64,
+    /// The id of the file this heading belongs to.
     pub file_id: i64,
+    /// The heading level, from `1` to `6`.
     pub level: u8,
+    /// The heading text.
     pub text: String,
+    /// The GitHub-style anchor slug for this heading.
     pub anchor: String,
 }
 
 /// A link stored in the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkEntry {
+    /// The link row's database id.
     pub id: i64,
+    /// The id of the file this link originates from.
     pub file_id: i64,
+    /// What kind of link this is.
     pub link_type: LinkType,
+    /// The link destination (URL or wikilink target).
     pub target: String,
+    /// The link text / label, if any.
     pub text: Option<String>,
 }
 
 /// A full-text search hit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchResult {
+    /// The id of the matching file.
     pub file_id: i64,
+    /// The matching file's path relative to the workspace root.
     pub relative_path: String,
+    /// The file's title (first heading, falling back to the path).
     pub title: String,
+    /// An excerpt of the matching body text, with matches wrapped in `<b>`.
     pub snippet: String,
+    /// The FTS5 BM25 score; lower values are better matches.
     pub rank: f64,
 }
 

@@ -1,3 +1,5 @@
+//! Workspace scanning: discover Markdown files under a directory.
+
 use crate::helpers::sort_relative_paths;
 use std::path::{Path, PathBuf};
 /// Recursively walks a directory tree and yields relative paths of `.md` files.

@@ -1,3 +1,11 @@
+//! Markdown parsing: turn raw file content into structured data.
+//!
+//! [`Parser`] extracts frontmatter, headings, links (including native
+//! wikilinks via `pulldown-cmark`'s `ENABLE_WIKILINKS` option), tags, and the
+//! full-text body from a single Markdown document. Headings and links carry
+//! absolute byte offsets into the original source so results can be mapped
+//! back to positions in the file.
+
 mod helpers;
 
 pub use helpers::extract_tags_from_frontmatter;
@@ -18,6 +26,7 @@ use std::collections::HashSet;
 pub struct Parser;
 
 impl Parser {
+    /// Create a new parser with default options.
     pub fn new() -> Self {
         Self
     }
@@ -248,38 +257,59 @@ impl Parser {
 /// The result of parsing a single Markdown file.
 #[derive(Debug)]
 pub struct ParseResult {
+    /// Raw YAML frontmatter (between the `---` delimiters), if the file had
+    /// any. `None` when the file has no frontmatter block.
     pub frontmatter: Option<String>,
+    /// Tags extracted from the `tags` key of the frontmatter.
     pub tags: Vec<String>,
+    /// All headings found in the document, in document order.
     pub headings: Vec<Heading>,
+    /// All links found in the document, in document order.
     pub links: Vec<Link>,
+    /// The extracted plain-text body (frontmatter stripped), used for
+    /// full-text search.
     pub body: String,
 }
 
 /// A heading found in a Markdown file.
 #[derive(Debug)]
 pub struct Heading {
+    /// The heading level, from `1` (`#`) to `6` (`######`).
     pub level: u8,
+    /// The heading text (inline markup stripped).
     pub text: String,
+    /// A GitHub-style slug anchor for the heading, unique within the file.
     pub anchor: String,
+    /// Absolute byte offset of the heading in the original source.
     pub position: usize,
 }
 
 /// A link found in a Markdown file.
 #[derive(Debug)]
 pub struct Link {
+    /// What kind of link this is (inline, reference, wikilink, …).
     pub link_type: LinkType,
+    /// The link destination: a URL for regular links, or the target name for
+    /// wikilinks (without `[[`/`]]`).
     pub target: String,
+    /// The link text / label, if any.
     pub text: Option<String>,
+    /// Absolute byte offset of the link in the original source.
     pub position: usize,
 }
 
 /// The type of a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkType {
+    /// A standard inline link: `[text](target)`.
     Inline,
+    /// A reference-style link: `[text][ref]` or `[ref]`.
     Reference,
+    /// A wikilink: `[[target]]` or `[[target|label]]`.
     Wikilink,
+    /// An automatic link: `<https://example.com>`.
     Autolink,
+    /// An image: `![alt](target)`.
     Image,
 }
 

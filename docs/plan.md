@@ -65,8 +65,8 @@
 
 ### Phase 6 — Polish & documentation
 
-- [ ] Write API docs (`#![warn(missing_docs)]`).
-- [ ] Write a comprehensive `README.md` with usage examples.
+- [x] Write API docs (`#![warn(missing_docs)]`).
+- [x] Write a comprehensive `README.md` with usage examples.
 - [ ] Publish to crates.io (optional).
 
 ---
