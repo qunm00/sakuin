@@ -285,6 +285,8 @@ Methods:
 - `Indexer::listen()` — Start filesystem watching.
 - `Indexer::poll()` — Check for channel messages from the watcher and apply
   incremental updates.
+- `Indexer::apply_event(event)` — Apply a single `WatchEvent`. Used by
+  `poll()`; also callable directly when you bring your own event source.
 - `Indexer::query()` — Return a `Query` handle.
 
 ---

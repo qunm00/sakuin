@@ -87,7 +87,7 @@ impl IndexStore {
     ///
     /// Returns the file's database id.
     pub fn upsert_file(&mut self, file: &FileInfo) -> Result<i64, Box<dyn std::error::Error>> {
-        self.conn.execute(
+        let id: i64 = self.conn.query_row(
             "INSERT INTO files (relative_path, absolute_path, hash, frontmatter, size_bytes, modified_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(relative_path) DO UPDATE SET
@@ -96,7 +96,8 @@ impl IndexStore {
                  frontmatter = excluded.frontmatter,
                  size_bytes = excluded.size_bytes,
                  modified_at = excluded.modified_at,
-                 indexed_at = datetime('now')",
+                 indexed_at = datetime('now')
+             RETURNING id",
             params![
                 file.relative_path,
                 file.absolute_path,
@@ -105,9 +106,9 @@ impl IndexStore {
                 file.size_bytes as i64,
                 file.modified_at,
             ],
+            |row| row.get(0),
         )?;
-
-        Ok(self.conn.last_insert_rowid())
+        Ok(id)
     }
 
     /// Delete the file identified by `relative_path` and all of its child
@@ -508,6 +509,24 @@ mod tests {
             .expect("file should still exist after reindex");
         assert_eq!(fetched.hash, fi2.hash);
         assert_eq!(fetched.size_bytes, 29);
+    }
+
+    #[test]
+    fn upsert_returns_same_id_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let mut store = IndexStore::open(&db_path).unwrap();
+
+        let a = FileInfo::from_content("a.md".to_string(), "/tmp/a.md".to_string(), b"a v1", None);
+        let b = FileInfo::from_content("b.md".to_string(), "/tmp/b.md".to_string(), b"b v1", None);
+        let a_id = store.upsert_file(&a).unwrap();
+        store.upsert_file(&b).unwrap();
+
+        // Re-indexing an existing file must return its original id, not
+        // last_insert_rowid() (which points at the most recent INSERT).
+        let a_updated =
+            FileInfo::from_content("a.md".to_string(), "/tmp/a.md".to_string(), b"a v2", None);
+        assert_eq!(store.upsert_file(&a_updated).unwrap(), a_id);
     }
 
     #[test]

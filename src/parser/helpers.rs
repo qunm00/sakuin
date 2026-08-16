@@ -36,10 +36,21 @@ pub fn extract_tags_from_frontmatter(frontmatter: Option<&str>) -> Vec<String> {
     };
 
     match parsed.tags {
-        Some(TagsOrString::Sequence(tags)) => tags,
+        Some(TagsOrString::Sequence(tags)) => dedup_tags(tags),
         Some(TagsOrString::Single(tag)) => vec![tag],
         None => Vec::new(),
     }
+}
+
+/// Remove duplicate tags, preserving first-seen order.
+///
+/// The `tags` table enforces `UNIQUE(file_id, tag)`, so duplicates would
+/// otherwise abort indexing with a constraint violation.
+fn dedup_tags(tags: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(tags.len());
+    tags.into_iter()
+        .filter(|tag| seen.insert(tag.clone()))
+        .collect()
 }
 
 // ── Frontmatter extraction ───────────────────────────────

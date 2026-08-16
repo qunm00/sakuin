@@ -794,4 +794,98 @@ See <https://auto.link> for more.
         let tags = extract_tags_from_frontmatter(Some("tags: [unclosed"));
         assert!(tags.is_empty());
     }
+
+    #[test]
+    fn extract_tags_deduplicates_while_preserving_order() {
+        let tags = extract_tags_from_frontmatter(Some("tags: [rust, rust, markdown, rust]"));
+        assert_eq!(tags, vec!["rust", "markdown"]);
+    }
+
+    // ── Phase 5: property-based tests ──────────────────
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn parsing_arbitrary_input_never_panics_and_positions_are_in_bounds(
+            document in prop::collection::vec(
+                prop::sample::select(
+                    &['a', 'b', 'c', ' ', '\n', '#', '-', '[', ']', '<', '>', '`', '*', 'é', '日', '_', '.', '/', ':', '(', ')'][..],
+                ),
+                0..300,
+            )
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+        ) {
+            let result = Parser::new().parse(&document);
+            let byte_len = document.len();
+            prop_assert!(
+                result
+                    .headings
+                    .iter()
+                    .all(|heading| heading.position <= byte_len),
+                "heading position out of bounds"
+            );
+            prop_assert!(
+                result.links.iter().all(|link| link.position <= byte_len),
+                "link position out of bounds"
+            );
+        }
+
+        #[test]
+        fn heading_positions_are_unique(
+            lines in prop::collection::vec(
+                prop::sample::select(
+                    &[
+                        "# Alpha Beta",
+                        "# Alpha Beta",
+                        "## Beta Gamma",
+                        "### Beta Gamma",
+                        "### Gamma Delta",
+                        "",
+                    ][..],
+                ),
+                1..200,
+            ),
+        ) {
+            let result = Parser::new().parse(&lines.join("\n"));
+            let mut positions: Vec<usize> = result
+                .headings
+                .iter()
+                .map(|heading| heading.position)
+                .collect();
+            positions.sort_unstable();
+            prop_assert!(
+                positions.windows(2).all(|pair| pair[0] != pair[1]),
+                "duplicate heading positions: {positions:?}"
+            );
+        }
+
+        #[test]
+        fn link_positions_are_unique(
+            lines in prop::collection::vec(
+                prop::sample::select(
+                    &[
+                        "See [[alpha]].",
+                        "See [[alpha|lab]] and [site](https://example.com).",
+                        "![img](pic.png) and <https://auto.example.com>.",
+                        "Plain text.",
+                        "",
+                    ][..],
+                ),
+                1..200,
+            ),
+        ) {
+            let result = Parser::new().parse(&lines.join("\n"));
+            let mut positions: Vec<usize> = result
+                .links
+                .iter()
+                .map(|link| link.position)
+                .collect();
+            positions.sort_unstable();
+            prop_assert!(
+                positions.windows(2).all(|pair| pair[0] != pair[1]),
+                "duplicate link positions: {positions:?}"
+            );
+        }
+    }
 }

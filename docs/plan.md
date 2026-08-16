@@ -57,11 +57,11 @@
 - [x] Implement incremental update logic.
 - [x] Test with simulated filesystem events (`tempfile`).
 
-### Phase 5 — Determinism & correctness
+### Phase 5 — Determinism & correctness ✅
 
-- [ ] Add deterministic-ordering tests.
-- [ ] Add property-based tests (e.g., `proptest`) for idempotency.
-- [ ] Benchmark full re-index vs. incremental update.
+- [x] Add deterministic-ordering tests.
+- [x] Add property-based tests (e.g., `proptest`) for idempotency.
+- [x] Benchmark full re-index vs. incremental update.
 
 ### Phase 6 — Polish & documentation
 
@@ -101,6 +101,13 @@
 
 ## Future Work
 
+- **FTS orphan cleanup** — `delete_file` removes the `files` row (and cascades
+  headings/links/tags via FK) but not the corresponding FTS row, since FTS5
+  does not support `ON DELETE CASCADE`. Deleted-then-recreated files therefore
+  leave stale `fts` rows behind. They are invisible to JOIN-based queries and
+  snapshots, but they leak storage. Fix: delete the FTS row in `delete_file`
+  (or add a trigger) and add a regression test that deletes and recreates a
+  file while asserting the FTS table holds exactly one row per `file_id`.
 - **Cross-file reference resolution** — Resolve wikilink targets to actual file
   paths; detect broken links.
 - **Graph export** — Export the link graph as adjacency lists for external
