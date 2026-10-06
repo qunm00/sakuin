@@ -22,6 +22,68 @@ cargo fmt --check && cargo clippy --all-targets -- -D warnings \
 Expect the first `cargo build --all-targets` to take **~20 minutes** — this
 crate compiles the bundled SQLite amalgamation plus criterion/proptest.
 
+## Container workflow (no host install)
+
+The `Dockerfile` at the repo root builds the same toolchain into an image,
+so nothing has to be installed on the host. `rust:1-bookworm` already has
+gcc/libc6-dev, and the `Dockerfile` adds the `rustfmt` and `clippy`
+components, so the image needs no `apt-get`.
+
+Build once and keep the tag — the image *is* the cache:
+
+```sh
+docker build -t sakuin-dev .
+```
+
+A shell in the container with the host working copy mounted at
+`/workspace` (bind mount is essential — without it you would run the
+snapshot baked into the image, not your edits):
+
+```sh
+docker run --rm -it -v "$PWD:/workspace" sakuin-dev
+```
+
+The full CI gate inside the container:
+
+Use `bash -c`, **not** `bash -lc`: a login shell sources `/etc/profile`,
+which resets `PATH` and hides the toolchain in `/usr/local/cargo/bin`.
+
+```sh
+docker run --rm -v "$PWD:/workspace" sakuin-dev \
+  bash -c 'cargo fmt --all --check \
+    && cargo clippy --all-targets -- -D warnings \
+    && cargo build --all-targets \
+    && cargo test'
+```
+
+The example binary against a scratch vault. The example takes **no path
+argument**: it indexes its own current directory and writes `sakuin.db`
+there, so `cd` into the vault. It also never exits — it indexes, then
+watches forever — so expect to stop it with Ctrl-C.
+
+```sh
+mkdir -p /tmp/scratch-vault && echo '# Hello' > /tmp/scratch-vault/note.md
+docker run --rm -it -v "$PWD:/workspace" -v /tmp/scratch-vault:/vault sakuin-dev \
+  bash -c 'cd /vault && cargo run --example basic-index --manifest-path /workspace/Cargo.toml'
+```
+
+It prints `Indexing complete.` and then blocks; the `sakuin.db*` files
+appear next to the vault's notes.
+
+Notes:
+
+- The first build is ~20 min (bundled SQLite is compiled from source).
+  Later `docker build`s are instant unless the `Dockerfile` or manifests
+  change; `--no-cache` pays it again.
+- Optional: `-v "$PWD/target:/workspace/target"` reuses compiled artifacts
+  across container recreation. On Apple Silicon, prefer *not* to mount
+  `target/` — host and image architectures must match or Cargo rejects the
+  artifacts.
+- The container runs as root, so a mounted `target/` ends up root-owned.
+  If that bites, add `--user "$(id -u):$(id -g)"`.
+- See [features/container-dev-environment.md](features/container-dev-environment.md)
+  for the design rationale and trade-offs.
+
 ## Why a C compiler is mandatory
 
 Sakuin depends on `rusqlite` with the `bundled` feature, which compiles
