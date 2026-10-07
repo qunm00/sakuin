@@ -299,55 +299,72 @@ Trade-offs:
       syntax error — so the `quote_query` doc no longer claims blank input
       produces an unmatchable query.
 
-### Step 5 — `search_with_options`
-- [ ] Build the SQL dynamically (the column list and the `bm25` weights are
-      data-dependent), but keep **all user values bound as parameters** —
-      the query string is the only interpolated value and it comes from
-      `quote_query`.
-- [ ] Shape:
-      ```sql
-      SELECT f.id, f.relative_path,
-             CASE WHEN fts.title IS NULL OR fts.title = ''
-                  THEN f.relative_path ELSE fts.title END,
-             snippet(<table>, '<b>', '</b>', '...', ?tokens),
-             bm25(<table>, ?w0, ?w1, ...)
-      FROM <table>
-      JOIN files f ON f.id = <table>.file_id
-      WHERE <table> MATCH ?1
-      ORDER BY bm25(<table>, ?w0, ...), f.relative_path
-      LIMIT ?2 OFFSET ?3
-      ```
-      - `LIMIT ?2` is bound to `-1` when `limit` is `None` (`i64`).
-      - `snippet(...)` and `bm25(...)` reference the table by its real name so
-        the `column` argument of `snippet` is the *body* column index, which
-        is now `3` after migration 002; compute it from the field list instead
-        of hard-coding.
-      - When `snippet_tokens == 0`, bind an empty snippet via
-        `CASE WHEN ?tokens = 0 THEN '' ELSE snippet(...) END` to keep a single
-        prepared-statement shape (simpler than two SQL strings).
-      - `bm25` weights: per-column weights `[0.6, 0.9, 1.0]` for
-        (path, title, body) by default; a future `SearchOptions::with_weights`
-        is out of scope. Document that `rank` semantics are unchanged
-        (lower is better) even though the weight vector differs.
-- [ ] Case sensitivity: when `case_sensitive` is set, add the `GLOB` filter
-      from §3 to the `WHERE` clause, with a `*`-escaped pattern bound as a
-      parameter. Because it filters candidates, `LIMIT`/`OFFSET` can still be
-      pushed into SQL — the `GLOB` runs before `LIMIT` in the same statement.
-- [ ] Blank query → `Ok(Vec::new())` before any SQL is built.
-- [ ] Fields→column projection helper:
-      `fn selected_fields(fields: &[SearchField]) -> Vec<SearchField>`
-      returning the full default set when `fields` is empty.
-- [ ] Row mapping reuses a new shared `search_result_from_row` so `search`
-      and `search_with_options` cannot drift.
+### Step 5 — `search_with_options` ✅
+- [x] SQL built dynamically; every caller value is a bound parameter. Only
+      structural SQL is formatted: the FTS5 column filter, the number of `GLOB`
+      terms, and the placeholder numbers. The `MATCH` argument itself is data
+      (`quote_query` output), never interpolated into the statement text.
+- [x] `LIMIT ?n` is bound to `-1` when `limit` is `None`.
+- [x] `snippet`/`bm25` reference the table by name; the snippet column index
+      comes from `SearchField::column_index()`, which encodes the migration-002
+      column order (`file_id` 0, `path` 1, `title` 2, `body` 3) rather than a
+      bare literal. A test asserts those names and indices against the schema.
+- [x] `snippet_tokens == 0` is handled inside the statement with
+      `CASE WHEN ?n = 0 THEN '' ELSE snippet(...) END`, so one prepared-statement
+      shape serves both cases. Verified against the bundled SQLite: FTS5 accepts
+      a bound parameter for the token count.
+- [x] Snippets are also suppressed when `SearchField::Body` is not among the
+      searched fields, because a snippet is an excerpt of the body and would be
+      empty or misleading otherwise.
+- [x] `bm25` weights `[0.6, 0.9, 1.0]` for (path, title, body); columns left
+      out of `fields` are given weight `0.0` so a narrowed query is not scored
+      against text it never looked at. Documented that `rank` semantics are
+      unchanged (lower is better).
+- [x] Case sensitivity adds one `GLOB` term per searched column, joined with
+      `OR` into the same `WHERE`, so it runs before `LIMIT`/`OFFSET`.
+- [x] Blank query → `Ok(Vec::new())` before any SQL is built.
+- [x] `fn selected_fields(fields: &[SearchField]) -> Vec<SearchField>`
+      returns the full default set for an empty slice, and always returns
+      columns in table order so the weight vector stays aligned.
+- [x] Row mapping is shared: `search`, `try_search`, and `search_with_options`
+      all funnel through `execute_search`.
 
-### Step 6 — `try_search` and `search`
-- [ ] `try_search(q) = search_with_options(q, &SearchOptions::new())`.
-- [ ] Keep `search` with its current signature and raw-FTS5 passthrough
-      semantics; re-implement it as a thin call into the same internal
-      `execute_search` with `raw_query: true` so the two never diverge.
-      Mark it `#[deprecated(note = "use try_search / search_with_options")]`
-      and add a migration note to the README. `examples/basic-index.rs` and
-      `benches/bench_index.rs` are updated to `try_search`.
+### Step 6 — `try_search` and `search` ✅
+- [x] `try_search(q) = search_with_options(q, &SearchOptions::new())`.
+- [x] `search` keeps its signature and raw-FTS5 passthrough semantics, but is
+      now a thin call into the same `execute_search` with `raw_query: true`, so
+      the two cannot drift. Marked `#[deprecated]`.
+- [x] `examples/basic-index.rs` and `benches/bench_index.rs` do not call
+      `search` (checked — no call sites outside the unit tests and the README).
+      Internal tests moved to `try_search`, and one `#[allow(deprecated)]` test
+      pins the old passthrough behaviour (operators honoured, unbalanced quote
+      is a backend error).
+- [ ] README migration note: still outstanding (Step 7).
+
+### Findings that changed the design
+
+- **Prefix search matches stems, not words.** With `tokenize='porter
+  unicode61'` the index stores stems and FTS5 matches a prefix query against
+  the stem. Probed on the bundled SQLite: `index*` matches `indexing`, but
+  `indexi*` does not; likewise `guid*` matches `guide` while `guit*` does not.
+  This is a real usability limit of prefix search with a stemming tokenizer and
+  is now documented on both `SearchOptions::prefix` and
+  `search_with_options`, with a test pinning it.
+- **A case-sensitive `GLOB` can only narrow, never broaden.** Candidates still
+  come from FTS token matching (which folds case), so the `GLOB` re-check only
+  removes rows. The plan's "substring, not token" trade-off was therefore
+  misleading: a mid-token substring such as `ndexe` produces no FTS candidate at
+  all, so no amount of `GLOB` matching can return that file. The docs and tests
+  now describe narrowing-only, and the useful case — picking the file that
+  spells an identifier with a particular case out of several candidates — is
+  what the tests assert.
+- **A bare `GLOB` on an FTS5 column returns nothing.** `SELECT fts.path FROM
+  fts WHERE fts.path GLOB ?` yields zero rows because the table is not scanned
+  without a `MATCH`. The filter is therefore only usable in combination with
+  `fts MATCH`, which is exactly how `execute_search` builds it.
+- **FTS5 accepts the two-character phrase `""`** (a zero-token phrase matching
+  nothing); only `""""` is a syntax error. Recorded in Step 3 above.
+
 
 ### Step 7 — Docs, examples, benches
 - [ ] README: new "Search" section showing the builder and a table of

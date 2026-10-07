@@ -168,22 +168,215 @@ impl<'conn> Query<'conn> {
     ///
     /// An empty or whitespace-only query returns no results. Invalid FTS5
     /// query syntax (for example an unbalanced `"`) is returned as an error.
+    ///
+    /// The query string reaches FTS5 **verbatim**, so FTS5 operators (`AND`,
+    /// `OR`, `NEAR`, `*`, …) are interpreted rather than matched as literal
+    /// text, and malformed input surfaces as a raw backend error. Prefer
+    /// [`Query::try_search`] or [`Query::search_with_options`], which escape
+    /// the input and report query problems as
+    /// [`SearchError::InvalidQuery`].
+    #[deprecated(note = "use Query::try_search or Query::search_with_options")]
     pub fn search(&self, query: &str) -> rusqlite::Result<Vec<SearchResult>> {
+        self.execute_search(query, &SearchOptions::new(), true)
+    }
+
+    /// Full-text search with the default options and a typed error.
+    ///
+    /// Equivalent to `search_with_options(query, &SearchOptions::new())`, but
+    /// far more common: it escapes `query` (so it is always matched as literal
+    /// text) and reports an unusable query as
+    /// [`SearchError::InvalidQuery`] rather than a raw backend error.
+    pub fn try_search(&self, query: &str) -> Result<Vec<SearchResult>, SearchError> {
+        self.search_with_options(query, &SearchOptions::new())
+    }
+
+    /// Full-text search with configurable fields, paging, prefix matching,
+    /// case sensitivity, and snippet length.
+    ///
+    /// `query` is escaped by [`quote_query`], so it is always matched as
+    /// literal text: `NEAR`, `AND`, `*` and friends have no special meaning.
+    /// A blank query returns no results.
+    ///
+    /// Semantics of each option:
+    ///
+    /// - [`SearchOptions::fields`] restricts matching to the named columns.
+    ///   An empty slice searches all of them. Columns left out are also given
+    ///   a zero BM25 weight, so they cannot influence the score.
+    /// - [`SearchOptions::prefix`] makes the final token a prefix match, so
+    ///   `docu` also matches `document`. Note that the `porter` tokenizer
+    ///   stores stems, so the prefix must match the *stem*: `index*` matches
+    ///   `indexing`, while `indexi*` does not.
+    /// - [`SearchOptions::case_sensitive`] re-checks the FTS candidates with a
+    ///   case-sensitive `GLOB` over the stored text of the searched columns.
+    ///   Because FTS has already matched the tokens case-insensitively, this
+    ///   step can only *remove* candidates, never add one: a query that FTS
+    ///   finds no token for returns nothing, however the `GLOB` is written.
+    ///   It costs `O(candidates)` rather than `O(log n)`, and it runs before
+    ///   `limit`/`offset`, so paging stays correct.
+    /// - [`SearchOptions::snippet_tokens`] sets the approximate snippet length
+    ///   in tokens; `0` suppresses snippets and yields `""`. Snippets are
+    ///   excerpts of the body, so they are also empty when
+    ///   [`SearchField::Body`] is not among the searched fields.
+    /// - [`SearchOptions::limit`] and [`SearchOptions::offset`] page the
+    ///   results, which are ordered by rank and then by `relative_path` so
+    ///   that paging is deterministic.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SearchError::InvalidQuery`] for a blank query or a query FTS5
+    /// cannot parse, and [`SearchError::Backend`] for anything else.
+    pub fn search_with_options(
+        &self,
+        query: &str,
+        options: &SearchOptions<'_>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        self.execute_search(query, options, false)
+            .map_err(SearchError::from)
+    }
+
+    /// The single SQL path behind [`Query::search`], [`Query::try_search`],
+    /// and [`Query::search_with_options`].
+    ///
+    /// With `raw_query` set, `query` is bound to `MATCH` unchanged and every
+    /// option is ignored — that is the deprecated passthrough behaviour. With
+    /// `raw_query` clear, `query` is escaped, narrowed to the selected
+    /// columns, optionally prefix-matched, and optionally `GLOB`-filtered.
+    ///
+    /// Only *structural* SQL is built by string formatting: the FTS5 column
+    /// filter, the number of `GLOB` terms, and the placeholders themselves.
+    /// Every caller-supplied value is a bound parameter.
+    fn execute_search(
+        &self,
+        query: &str,
+        options: &SearchOptions<'_>,
+        raw_query: bool,
+    ) -> rusqlite::Result<Vec<SearchResult>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let mut statement = self.conn.prepare(
+
+        let fields = selected_fields(options.fields);
+
+        // A snippet is an excerpt of the body, so it is only meaningful when
+        // the body is one of the searched columns.
+        let snippet_tokens: i64 = if fields.contains(&SearchField::Body) {
+            options.snippet_tokens as i64
+        } else {
+            0
+        };
+
+        // The `MATCH` argument: the escaped phrase, narrowed to the selected
+        // columns with an FTS5 column filter. All columns means no filter.
+        let match_expression = if raw_query {
+            query.to_string()
+        } else {
+            let phrase = quote_query_prefix(query, options.prefix);
+            if fields.len() == ALL_SEARCH_FIELDS.len() {
+                phrase
+            } else {
+                let columns = fields
+                    .iter()
+                    .map(|field| field.column_name())
+                    .collect::<Vec<&str>>()
+                    .join(" ");
+                format!("{{{columns}}} : {phrase}")
+            }
+        };
+
+        // Case sensitivity is a case-sensitive `GLOB` re-check of the FTS
+        // candidates. The pattern's wildcards are escaped so that a query
+        // containing `*` cannot become a match-everything pattern.
+        let case_sensitive = options.case_sensitive && !raw_query;
+        let glob_pattern = format!("*{}*", escape_glob(query.trim()));
+        let glob_terms: Vec<String> = if case_sensitive {
+            fields
+                .iter()
+                .map(|field| format!("fts.{} GLOB ?", field.column_name()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Columns that were not searched get a zero weight, so a narrowed
+        // query is not scored against text it never looked at.
+        let weights: Vec<f64> = ALL_SEARCH_FIELDS
+            .iter()
+            .map(|field| {
+                if fields.contains(field) {
+                    default_weight(*field)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        // Parameter numbers, in the order the placeholders appear below:
+        // MATCH, snippet tokens, the three weights, the GLOB terms, then paging.
+        let match_parameter = 1;
+        let snippet_parameter = 2;
+        let first_weight_parameter = 3;
+        let weight_parameters: Vec<usize> = (0..ALL_SEARCH_FIELDS.len())
+            .map(|index| first_weight_parameter + index)
+            .collect();
+        let first_glob_parameter = first_weight_parameter + ALL_SEARCH_FIELDS.len();
+        let glob_parameters: Vec<usize> = (0..glob_terms.len())
+            .map(|index| first_glob_parameter + index)
+            .collect();
+        let limit_parameter = first_glob_parameter + glob_parameters.len();
+        let offset_parameter = limit_parameter + 1;
+
+        let weight_placeholders = weight_parameters
+            .iter()
+            .map(|number| format!("?{number}"))
+            .collect::<Vec<String>>()
+            .join(", ");
+
+        let case_filter = if glob_terms.is_empty() {
+            String::new()
+        } else {
+            let terms = glob_terms
+                .iter()
+                .zip(&glob_parameters)
+                .map(|(term, number)| term.replace('?', &format!("?{number}")))
+                .collect::<Vec<String>>()
+                .join(" OR ");
+            format!("\n             AND ({terms})")
+        };
+
+        let statement_sql = format!(
             "SELECT f.id, f.relative_path,
                     CASE WHEN fts.title IS NULL OR fts.title = ''
                          THEN f.relative_path ELSE fts.title END,
-                    snippet(fts, 3, '<b>', '</b>', '...', 16),
-                    bm25(fts)
+                    CASE WHEN ?{snippet_parameter} = 0
+                         THEN ''
+                         ELSE snippet(fts, {body_column}, '<b>', '</b>', '...',
+                                      ?{snippet_parameter})
+                    END,
+                    bm25(fts, {weight_placeholders})
              FROM fts
              JOIN files f ON f.id = fts.file_id
-             WHERE fts MATCH ?1
-             ORDER BY bm25(fts), f.relative_path",
-        )?;
-        let rows = statement.query_map(params![query], |row| {
+             WHERE fts MATCH ?{match_parameter}{case_filter}
+             ORDER BY bm25(fts, {weight_placeholders}), f.relative_path
+             LIMIT ?{limit_parameter} OFFSET ?{offset_parameter}",
+            body_column = SearchField::Body.column_index(),
+        );
+
+        // SQLite reads a negative LIMIT as "no limit".
+        let limit: i64 = options.limit.map_or(-1, |limit| limit as i64);
+        let offset: i64 = options.offset as i64;
+
+        let mut statement = self.conn.prepare(&statement_sql)?;
+        let mut parameters: Vec<&dyn rusqlite::ToSql> = vec![&match_expression, &snippet_tokens];
+        for weight in &weights {
+            parameters.push(weight);
+        }
+        for _ in &glob_terms {
+            parameters.push(&glob_pattern);
+        }
+        parameters.push(&limit);
+        parameters.push(&offset);
+
+        let rows = statement.query_map(rusqlite::params_from_iter(parameters), |row| {
             Ok(SearchResult {
                 file_id: row.get(0)?,
                 relative_path: row.get(1)?,
@@ -208,8 +401,84 @@ pub enum SearchField {
     Path,
     /// The document title.
     Title,
-    /// The indexed body text.
+    /// The document body text.
     Body,
+}
+
+impl SearchField {
+    /// The column name as it appears in the `fts` table.
+    ///
+    /// Used both for the FTS5 column filter (`{path title} : query`) and for
+    /// the `GLOB` re-check (`fts.path GLOB ?`).
+    const fn column_name(self) -> &'static str {
+        match self {
+            SearchField::Path => "path",
+            SearchField::Title => "title",
+            SearchField::Body => "body",
+        }
+    }
+
+    /// The column's 0-based index in the `fts` table.
+    ///
+    /// The indices follow the column order created by migration
+    /// `002-fts-fields` — `file_id UNINDEXED, path, title, body` — so `file_id`
+    /// is 0, `path` is 1, `title` is 2, and `body` is 3. `snippet` takes a
+    /// column *index*, not a name, which is why these are indices.
+    const fn column_index(self) -> usize {
+        match self {
+            SearchField::Path => 1,
+            SearchField::Title => 2,
+            SearchField::Body => 3,
+        }
+    }
+}
+
+/// Every searchable column, in `fts` table order. The BM25 weight vector is
+/// positional, so this order must not change without updating
+/// [`default_weight`].
+const ALL_SEARCH_FIELDS: [SearchField; 3] =
+    [SearchField::Path, SearchField::Title, SearchField::Body];
+
+/// The default BM25 weight of a column: paths are noisy, titles are the most
+/// deliberate signal, and bodies are the bulk of the text.
+const fn default_weight(field: SearchField) -> f64 {
+    match field {
+        SearchField::Path => 0.6,
+        SearchField::Title => 0.9,
+        SearchField::Body => 1.0,
+    }
+}
+
+/// Expand a caller's field selection into the concrete list to search.
+///
+/// An empty slice means "every field", which is the documented default rather
+/// than an error.
+fn selected_fields(fields: &[SearchField]) -> Vec<SearchField> {
+    if fields.is_empty() {
+        return ALL_SEARCH_FIELDS.to_vec();
+    }
+    // Preserve the table's column order so the weight vector stays aligned.
+    ALL_SEARCH_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| fields.contains(field))
+        .collect()
+}
+
+/// Escape the `GLOB` metacharacters `*`, `?`, `[` and the escape character
+/// itself, so that user input is matched literally.
+///
+/// `LIKE` would be wrong here: `GLOB` is case-sensitive, and case-sensitive
+/// re-checking is the whole point of the `GLOB` filter.
+fn escape_glob(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for character in input.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Tuning knobs for [`Query::search_with_options`].
@@ -236,9 +505,17 @@ pub struct SearchOptions<'a> {
     /// Columns the query may match. An empty slice means every column.
     pub fields: &'a [SearchField],
     /// Treat the query as a prefix query, so `docu` also matches `document`.
+    ///
+    /// Caveat: the index is tokenized with `porter`, so it stores *stems* and
+    /// a prefix query is matched against the stem. `index*` matches
+    /// `indexing`, but `indexi*` does not.
     pub prefix: bool,
     /// Require the matched text to have the same case as the query. Useful for
     /// code identifiers, where `Indexer` and `indexer` are different things.
+    ///
+    /// Candidates still come from FTS, which folds case, so this option can
+    /// only ever *remove* rows: it re-checks each candidate with a
+    /// case-sensitive `GLOB` over the stored text.
     pub case_sensitive: bool,
     /// Approximate snippet length, in FTS5 tokens. `0` suppresses snippets
     /// entirely and yields an empty `SearchResult::snippet`.
@@ -1229,7 +1506,7 @@ mod tests {
         );
         let query = store.query();
 
-        let results = query.search("fox").unwrap();
+        let results = query.try_search("fox").unwrap();
         assert_eq!(results.len(), 2);
         // The file with more occurrences ranks first (lower BM25 score).
         assert_eq!(results[0].relative_path, "fox-heavy.md");
@@ -1258,7 +1535,7 @@ mod tests {
             .unwrap();
         let query = store.query();
 
-        let results = query.search("zebra").unwrap();
+        let results = query.try_search("zebra").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].relative_path, "plain.md");
         assert_eq!(results[0].title, "plain.md"); // empty title -> path fallback
@@ -1269,7 +1546,7 @@ mod tests {
         let (_dir, store) = workspace();
         let query = store.query();
 
-        assert!(query.search("zebra").unwrap().is_empty());
+        assert!(query.try_search("zebra").unwrap().is_empty());
     }
 
     #[test]
@@ -1277,8 +1554,8 @@ mod tests {
         let (_dir, store) = workspace();
         let query = store.query();
 
-        assert!(query.search("").unwrap().is_empty());
-        assert!(query.search("   ").unwrap().is_empty());
+        assert!(query.try_search("").unwrap().is_empty());
+        assert!(query.try_search("   ").unwrap().is_empty());
     }
 
     #[test]
@@ -1286,7 +1563,500 @@ mod tests {
         let (_dir, store) = workspace();
         let query = store.query();
 
-        // An unbalanced quote is a syntax error in FTS5.
+        // `try_search` escapes its input, so nothing the caller types can
+        // reach FTS5 as syntax — not even an unbalanced quote.
+        assert!(query.try_search("\"unterminated").unwrap().is_empty());
+    }
+
+    // ── search_with_options ──────────────────────────
+
+    /// Workspace with content chosen so that each option is observable:
+    /// a title match, a body-only match, and a path-only match.
+    fn option_workspace() -> (tempfile::TempDir, IndexStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(
+            &mut store,
+            &[
+                (
+                    "notes/rust.md",
+                    "---\ntitle: Rust Notes\n---\n\n# Rust Notes\n\nThe quick brown fox jumps over the lazy dog.",
+                ),
+                (
+                    "guide/indexing.md",
+                    "---\ntitle: Indexing Guide\n---\n\n# Indexing Guide\n\nHow the scanner walks a workspace.",
+                ),
+                (
+                    "misc/other.md",
+                    "---\ntitle: Other\n---\n\n# Other\n\nNothing relevant here.",
+                ),
+            ],
+        );
+        (dir, store)
+    }
+
+    #[test]
+    fn options_default_to_every_field() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        // "rust" is in a path, a title, and a body.
+        let all = query.try_search("rust").unwrap();
+        let paths_only = {
+            let fields = [SearchField::Path];
+            query
+                .search_with_options("rust", &SearchOptions::new().with_fields(&fields))
+                .unwrap()
+        };
+        let titles_only = {
+            let fields = [SearchField::Title];
+            query
+                .search_with_options("rust", &SearchOptions::new().with_fields(&fields))
+                .unwrap()
+        };
+        assert!(!all.is_empty());
+        assert_eq!(
+            paths_only.len(),
+            1,
+            "only notes/rust.md has rust in its path"
+        );
+        assert_eq!(titles_only.len(), 1);
+        assert_eq!(paths_only[0].relative_path, "notes/rust.md");
+    }
+
+    #[test]
+    fn options_empty_field_list_means_every_field() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        let explicit_empty = {
+            let fields: [SearchField; 0] = [];
+            query
+                .search_with_options("rust", &SearchOptions::new().with_fields(&fields))
+                .unwrap()
+        };
+        let omitted = query.try_search("rust").unwrap();
+        assert_eq!(explicit_empty.len(), omitted.len());
+    }
+
+    #[test]
+    fn options_title_field_does_not_match_the_body() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let fields = [SearchField::Title];
+
+        // "fox" is only in a body, never in a title.
+        let titles = query
+            .search_with_options("fox", &SearchOptions::new().with_fields(&fields))
+            .unwrap();
+        assert!(titles.is_empty());
+        assert!(!query.try_search("fox").unwrap().is_empty());
+    }
+    #[test]
+    fn options_limit_truncates_and_offset_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(
+            &mut store,
+            &[
+                ("a.md", "# A\n\nA shared zebra appears here."),
+                ("b.md", "# B\n\nAnother shared zebra appears here."),
+                ("c.md", "# C\n\nYet another shared zebra here."),
+                ("d.md", "# D\n\nA final shared zebra here."),
+            ],
+        );
+        let query = store.query();
+
+        let all = query.try_search("zebra").unwrap();
+        assert_eq!(all.len(), 4);
+
+        let first_two = query
+            .search_with_options("zebra", &SearchOptions::new().with_limit(2))
+            .unwrap();
+        assert_eq!(first_two.len(), 2);
+        assert_eq!(first_two[0].relative_path, all[0].relative_path);
+        assert_eq!(first_two[1].relative_path, all[1].relative_path);
+
+        // Paging walks the same ordered list.
+        let skipped = query
+            .search_with_options("zebra", &SearchOptions::new().with_offset(1))
+            .unwrap();
+        assert_eq!(skipped.len(), 3);
+        assert_eq!(skipped[0].relative_path, all[1].relative_path);
+        let page = query
+            .search_with_options("zebra", &SearchOptions::new().with_offset(2).with_limit(1))
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].relative_path, all[2].relative_path);
+
+        // Paging past the end yields nothing.
+        assert!(
+            query
+                .search_with_options("zebra", &SearchOptions::new().with_offset(4))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn options_prefix_matches_stem_prefixes() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        // Without `prefix`, a partial token matches nothing.
+        assert!(query.try_search("gui").unwrap().is_empty());
+        let prefixed = query
+            .search_with_options("gui", &SearchOptions::new().with_prefix(true))
+            .unwrap();
+        assert!(!prefixed.is_empty(), "gui* should match indexing");
+        assert!(
+            prefixed
+                .iter()
+                .any(|result| result.relative_path == "guide/indexing.md")
+        );
+    }
+
+    #[test]
+    fn options_prefix_matches_the_stem_not_the_word() {
+        // Documented caveat of the `porter` tokenizer: the index stores stems,
+        // and a prefix query is matched against the stem. `indexing` is stored
+        // as `index`, so `index*` matches and `indexi*` does not.
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let prefix = SearchOptions::new().with_prefix(true);
+
+        assert!(
+            !query
+                .search_with_options("index", &prefix)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            query
+                .search_with_options("indexi", &prefix)
+                .unwrap()
+                .is_empty(),
+            "indexi* should not match the stored stem `index`"
+        );
+    }
+
+    #[test]
+    fn options_case_sensitive_keeps_the_exact_casing() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let sensitive = SearchOptions::new().with_case_sensitive(true);
+
+        // The fixture stores `notes/rust.md` and the title `Rust Notes`.
+        assert_eq!(
+            query.search_with_options("Rust", &sensitive).unwrap().len(),
+            1,
+            "the title contains `Rust` with that exact casing"
+        );
+        assert_eq!(
+            query.search_with_options("rust", &sensitive).unwrap().len(),
+            1,
+            "the path contains `rust` in lower case"
+        );
+        assert!(
+            query
+                .search_with_options("RUST", &sensitive)
+                .unwrap()
+                .is_empty(),
+            "nothing in the fixture is written `RUST`"
+        );
+
+        // Without the option, FTS5 folds case and finds the same row.
+        assert_eq!(query.try_search("RUST").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn options_case_sensitive_filter_checks_every_searched_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(
+            &mut store,
+            &[
+                (
+                    "notes/Indexer.md",
+                    "# Notes\n\nNo mention of the term here.",
+                ),
+                (
+                    "misc/plain.md",
+                    "# Plain\n\nAn indexer walks the workspace.",
+                ),
+            ],
+        );
+        let query = store.query();
+        let sensitive = SearchOptions::new().with_case_sensitive(true);
+
+        // Both files are FTS candidates, because the index folds case.
+        assert_eq!(query.try_search("Indexer").unwrap().len(), 2);
+
+        // Only the one that spells it `Indexer` somewhere survives the GLOB:
+        // the other has `indexer` in lower case only.
+        let kept = query.search_with_options("Indexer", &sensitive).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].relative_path, "notes/Indexer.md");
+
+        // Searching paths only narrows the GLOB check to the path column.
+        let fields = [SearchField::Path];
+        let paths = query
+            .search_with_options("Indexer", &sensitive.clone().with_fields(&fields))
+            .unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].relative_path, "notes/Indexer.md");
+    }
+
+    #[test]
+    fn options_case_sensitive_filter_can_only_narrow_candidates() {
+        // Documented limitation: candidates still come from FTS token
+        // matching, so the case-sensitive `GLOB` can remove rows but never add
+        // one. A mid-token substring that is not itself a token cannot bring
+        // in a file.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(
+            &mut store,
+            &[("ids.md", "# Ids\n\nSee reIndexer for details.")],
+        );
+        let query = store.query();
+        let sensitive = SearchOptions::new().with_case_sensitive(true);
+
+        assert_eq!(
+            query
+                .search_with_options("reIndexer", &sensitive)
+                .unwrap()
+                .len(),
+            1
+        );
+        // `reindexer` is a candidate (FTS folds case) but has the wrong case.
+        assert!(
+            query
+                .search_with_options("reindexer", &sensitive)
+                .unwrap()
+                .is_empty()
+        );
+        // `ndexe` is only a substring of a token, so FTS produces no candidate
+        // at all and the `GLOB` never gets a chance to run.
+        assert!(
+            query
+                .search_with_options("ndexe", &sensitive)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[test]
+    fn options_case_sensitive_filter_survives_wildcards_in_the_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(
+            &mut store,
+            &[("star.md", "# Star\n\nA literal asterisk * here.")],
+        );
+        let query = store.query();
+
+        // A `*` in the query must not become a GLOB wildcard that matches
+        // every row. Here it produces no FTS candidates at all, so the result
+        // is empty rather than "everything".
+        let sensitive = SearchOptions::new().with_case_sensitive(true);
+        assert!(
+            query
+                .search_with_options("*", &sensitive)
+                .unwrap()
+                .is_empty()
+        );
+
+        // An ordinary word still matches, so the empty result above is about
+        // the wildcard and not a broken filter.
+        assert_eq!(
+            query
+                .search_with_options("asterisk", &sensitive)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn options_case_sensitive_paging_counts_filtered_results() {
+        // The GLOB filter runs before LIMIT, so `limit`/`offset` page the
+        // case-sensitive results and not the raw candidate set.
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let sensitive = SearchOptions::new().with_case_sensitive(true);
+
+        let results = query.search_with_options("rust", &sensitive).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            query
+                .search_with_options("rust", &sensitive.clone().with_limit(1))
+                .unwrap(),
+            results
+        );
+        assert!(
+            query
+                .search_with_options("rust", &sensitive.with_offset(1))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn options_snippet_tokens_zero_suppresses_snippets() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        let with_snippets = query.try_search("fox").unwrap();
+        assert!(with_snippets[0].snippet.contains("fox"));
+
+        let without = query
+            .search_with_options("fox", &SearchOptions::new().with_snippet_tokens(0))
+            .unwrap();
+        assert_eq!(without.len(), with_snippets.len());
+        assert!(without[0].snippet.is_empty());
+    }
+
+    #[test]
+    fn options_snippet_tokens_lengthen_the_snippet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        let body = (1..80)
+            .map(|index| format!("token{index}"))
+            .collect::<Vec<String>>()
+            .join(" ");
+        let document = format!("# Long\n\n{body}");
+        index_workspace(&mut store, &[("long.md", &document)]);
+        let query = store.query();
+
+        let short = query
+            .search_with_options("token40", &SearchOptions::new().with_snippet_tokens(3))
+            .unwrap();
+        let long = query
+            .search_with_options("token40", &SearchOptions::new().with_snippet_tokens(40))
+            .unwrap();
+        assert!(long[0].snippet.len() > short[0].snippet.len());
+    }
+
+    #[test]
+    fn options_snippets_are_empty_when_the_body_is_not_searched() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let fields = [SearchField::Path, SearchField::Title];
+
+        let results = query
+            .search_with_options("rust", &SearchOptions::new().with_fields(&fields))
+            .unwrap();
+        assert!(!results.is_empty());
+        assert!(
+            results.iter().all(|result| result.snippet.is_empty()),
+            "a snippet is an excerpt of the body, so it is meaningless here"
+        );
+    }
+
+    #[test]
+    fn options_blank_query_returns_empty() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        assert!(query.try_search("").unwrap().is_empty());
+        assert!(query.try_search("   ").unwrap().is_empty());
+    }
+
+    #[test]
+    fn options_never_leak_fts_syntax_errors() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+
+        // None of these reach FTS5 as syntax; all are literal phrases.
+        for input in [
+            "\"unterminated",
+            "NEAR",
+            "NEAR/2",
+            "a AND",
+            "(a",
+            "*",
+            "title:rust",
+            "^rust",
+            "rust -notes",
+        ] {
+            let result = query.try_search(input);
+            assert!(
+                result.is_ok(),
+                "{input:?} should not be an error, got {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[test]
+    fn options_results_are_deterministic_across_runs() {
+        let (_dir, store) = option_workspace();
+        let query = store.query();
+        let options = SearchOptions::new().with_limit(3);
+
+        let first = query.search_with_options("rust", &options).unwrap();
+        for _ in 0..5 {
+            let again = query.search_with_options("rust", &options).unwrap();
+            let paths = |results: &[SearchResult]| -> Vec<String> {
+                results.iter().map(|r| r.relative_path.clone()).collect()
+            };
+            assert_eq!(paths(&first), paths(&again));
+        }
+    }
+
+    #[test]
+    fn selected_fields_defaults_to_every_column() {
+        assert_eq!(selected_fields(&[]), ALL_SEARCH_FIELDS.to_vec());
+        assert_eq!(
+            selected_fields(&[SearchField::Body]),
+            vec![SearchField::Body]
+        );
+        // Order follows the table, not the caller's slice.
+        assert_eq!(
+            selected_fields(&[SearchField::Body, SearchField::Path]),
+            vec![SearchField::Path, SearchField::Body]
+        );
+    }
+
+    #[test]
+    fn escape_glob_escapes_every_metacharacter() {
+        assert_eq!(escape_glob("plain"), "plain");
+        assert_eq!(escape_glob("a*b"), "a\\*b");
+        assert_eq!(escape_glob("a?b"), "a\\?b");
+        assert_eq!(escape_glob("a[b"), "a\\[b");
+        assert_eq!(escape_glob("a\\b"), "a\\\\b");
+        // A trailing backslash must not escape the closing bracket we add.
+        assert_eq!(escape_glob("a\\"), "a\\\\");
+    }
+
+    #[test]
+    fn search_field_column_names_and_indices_match_the_schema() {
+        // These must agree with migration 002: file_id UNINDEXED, path, title, body.
+        assert_eq!(SearchField::Path.column_name(), "path");
+        assert_eq!(SearchField::Title.column_name(), "title");
+        assert_eq!(SearchField::Body.column_name(), "body");
+        assert_eq!(SearchField::Path.column_index(), 1);
+        assert_eq!(SearchField::Title.column_index(), 2);
+        assert_eq!(SearchField::Body.column_index(), 3);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_search_still_passes_the_query_through_verbatim() {
+        let (_dir, store) = workspace();
+        let query = store.query();
+
+        // The old API is raw FTS5: an unbalanced quote is a backend error.
         assert!(query.search("\"unterminated").is_err());
+
+        // ...and FTS5 operators are still interpreted, which `try_search`
+        // deliberately prevents. `fox OR documentation` is a real FTS5 query
+        // here; as a literal phrase it matches nothing.
+        let raw = query.search("fox OR documentation").unwrap();
+        assert!(!raw.is_empty(), "raw search should honour the OR operator");
+        assert!(
+            query.try_search("fox OR documentation").unwrap().is_empty(),
+            "try_search should match the input as one literal phrase"
+        );
     }
 }
