@@ -335,6 +335,77 @@ fn escape_like(input: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// Escape arbitrary user input into a single FTS5 phrase query.
+///
+/// The result is safe to bind to a `MATCH ?` parameter for any input: the
+/// user can never inject FTS5 operators, so `AND`, `OR`, `NOT`, `NEAR`, `*`,
+/// `:`, `-` and friends are matched as literal text.
+///
+/// The transformation is:
+///
+/// 1. NUL (`\0`) characters are removed. SQLite refuses to store or compare
+///    strings containing NUL, and an embedded NUL would truncate the term.
+/// 2. Leading, trailing, and repeated whitespace is collapsed to single
+///    spaces, so that the phrase's tokens line up with the caller's words and
+///    no empty tokens are produced.
+/// 3. Every `"` is doubled. FTS5 escapes a quote inside a string by
+///    doubling it; `"` has no other meaning inside a quoted string.
+/// 4. The result is wrapped in `"`. With `prefix`, a `*` is appended
+///    *outside* the closing quote (`"rust"*`), which makes only the final
+///    token a prefix match.
+///
+/// The output is a phrase, not a bareword, so it is never affected by the
+/// caller's surrounding text. Note that `quote_query` does **not** guarantee
+/// a matchable query on its own: input that is empty or entirely whitespace
+/// yields `""` (an empty phrase), which FTS5 does not accept. Callers must
+/// reject blank input before building SQL — see
+/// [`Query::search`](Query::search), which returns an empty result for it.
+///
+/// # Examples
+///
+/// ```
+/// # use sakuin_md::query::quote_query;
+/// assert_eq!(quote_query("rust notes"), "\"rust notes\"");
+/// assert_eq!(quote_query("  rust   notes "), "\"rust notes\"");
+/// assert_eq!(quote_query("say \"hi\""), "\"say \"\"hi\"\"\"");
+/// ```
+pub fn quote_query(input: &str) -> String {
+    // Remove NUL before splitting: it is not whitespace, so it would
+    // otherwise survive into the middle of a token.
+    let without_nul: String = input
+        .chars()
+        .filter(|character| *character != '\0')
+        .collect();
+
+    // `split_whitespace` both trims and collapses runs of (Unicode)
+    // whitespace, which is exactly the normalisation the phrase needs.
+    let normalized = without_nul
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+
+    let escaped = normalized.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+/// Escape user input into an FTS5 phrase query, optionally a prefix query.
+///
+/// See [`quote_query`] for the escaping rules. With `prefix`, a `*` is
+/// appended outside the closing quote so that the final token matches any
+/// word starting with it.
+///
+/// # Examples
+///
+/// ```
+/// # use sakuin_md::query::quote_query_prefix;
+/// assert_eq!(quote_query_prefix("docu", true), "\"docu\"*");
+/// assert_eq!(quote_query_prefix("docu", false), "\"docu\"");
+/// ```
+pub fn quote_query_prefix(input: &str, prefix: bool) -> String {
+    let phrase = quote_query(input);
+    if prefix { format!("{phrase}*") } else { phrase }
+}
+
 // ── Tests ──────────────────────────────────────────────
 
 #[cfg(test)]
@@ -342,6 +413,118 @@ mod tests {
     use super::*;
     use crate::parser::{Parser, extract_tags_from_frontmatter};
     use crate::store::{FileInfo, IndexStore};
+
+    // ── quote_query ──────────────────────────────────
+
+    #[test]
+    fn quote_query_wraps_input_in_a_phrase() {
+        assert_eq!(quote_query("rust"), "\"rust\"");
+        assert_eq!(quote_query("rust notes"), "\"rust notes\"");
+    }
+
+    #[test]
+    fn quote_query_trims_and_collapses_whitespace() {
+        assert_eq!(quote_query("  rust  "), "\"rust\"");
+        assert_eq!(quote_query("rust   notes"), "\"rust notes\"");
+        assert_eq!(quote_query("\t rust \n notes \r\n"), "\"rust notes\"");
+    }
+
+    #[test]
+    fn quote_query_strips_nul_bytes() {
+        assert_eq!(quote_query("ru\0st"), "\"rust\"");
+        assert_eq!(quote_query("\0rust\0"), "\"rust\"");
+    }
+
+    #[test]
+    fn quote_query_doubles_quotes() {
+        assert_eq!(quote_query("\""), "\"\"\"\"");
+        assert_eq!(quote_query("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn quote_query_leaves_fts_operators_as_literal_text() {
+        // Inside a phrase none of these are operators.
+        for input in [
+            "AND", "OR", "NOT", "NEAR", "*", "^", ":", "-", "(", ")", "rust*",
+        ] {
+            let quoted = quote_query(input);
+            assert!(
+                quoted.starts_with('"') && quoted.ends_with('"'),
+                "{input:?} was not quoted: {quoted:?}"
+            );
+        }
+        assert_eq!(quote_query("AND OR"), "\"AND OR\"");
+        assert_eq!(quote_query("a*"), "\"a*\"");
+    }
+
+    #[test]
+    fn quote_query_leaves_backslashes_untouched() {
+        // FTS5 strings have no backslash escape; only `""` is an escape.
+        assert_eq!(quote_query(r"a\b"), r#""a\b""#);
+    }
+
+    #[test]
+    fn quote_query_preserves_unicode() {
+        assert_eq!(quote_query("日本語 ノート"), "\"日本語 ノート\"");
+        assert_eq!(quote_query("héllo wörld"), "\"héllo wörld\"");
+    }
+
+    #[test]
+    fn quote_query_of_blank_input_is_an_empty_phrase() {
+        // Documented caveat: callers must reject blank input before building
+        // SQL, because FTS5 does not accept an empty phrase.
+        assert_eq!(quote_query(""), "\"\"");
+        assert_eq!(quote_query("   \t\n"), "\"\"");
+    }
+
+    #[test]
+    fn quote_query_prefix_appends_star_outside_the_quote() {
+        assert_eq!(quote_query_prefix("docu", true), "\"docu\"*");
+        assert_eq!(quote_query_prefix("docu", false), "\"docu\"");
+        assert_eq!(quote_query_prefix("rust notes", true), "\"rust notes\"*");
+    }
+
+    #[test]
+    fn quote_query_prefix_escapes_before_appending_the_star() {
+        // A user-supplied `*` must not be promoted into the prefix marker.
+        assert_eq!(quote_query_prefix("a*", true), "\"a*\"*");
+        assert_eq!(
+            quote_query_prefix("say \"hi\"", true),
+            "\"say \"\"hi\"\"\"*"
+        );
+    }
+
+    #[test]
+    fn quote_query_output_is_accepted_by_fts5() {
+        // The real check: every quoted form above must parse, whatever the
+        // user typed. This runs against the bundled SQLite via the store.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(&mut store, &[("notes/rust.md", "# Rust\n\nthe fox jumps")]);
+
+        // Blank input is deliberately absent: it is rejected by the caller
+        // before any SQL is built (see `Query::search`), so it never reaches
+        // FTS5.
+        for input in [
+            "\"",
+            "NEAR",
+            "rust*",
+            r"a\b",
+            "rust OR fox",
+            "日本語",
+            "\"\"\"",
+        ] {
+            let phrase = quote_query(input);
+            match store.conn.query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH ?1",
+                params![&phrase],
+                |row| row.get::<_, i64>(0),
+            ) {
+                Ok(count) => assert!(count >= 0),
+                Err(error) => panic!("MATCH {phrase:?} (from {input:?}) failed: {error}"),
+            }
+        }
+    }
 
     /// Write and index a set of markdown files into a fresh store.
     fn index_workspace(store: &mut IndexStore, files: &[(&str, &str)]) {

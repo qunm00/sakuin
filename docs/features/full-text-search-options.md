@@ -233,16 +233,32 @@ Trade-offs:
 - [x] `delete_file` already deletes from `fts` explicitly; no second table to
       keep in sync. The original concern about `fts_case` is moot.
 
-### Step 3 — `quote_query` (`src/query.rs`)
-- [ ] Implementation:
-      1. `input.trim()`; collapse internal whitespace runs to single spaces
-         (FTS5 phrases do not span whitespace runs cleanly).
-      2. Strip FTS5 control characters: `\0`.
-      3. Double every `"` (FTS5 string escaping is `""` inside a phrase).
-      4. Wrap the result in `"`; if `prefix`, append `*` **outside** the
-         closing quote: `"rust"*`.
-- [ ] Pure unit tests in `src/query.rs`: empty input, quotes, backslashes,
-      `AND`/`OR`/`NEAR` as literals, unicode, `prefix` shape.
+### Step 3 — `quote_query` (`src/query.rs`) ✅
+- [x] Implementation:
+      1. `\0` characters are stripped first (they are not whitespace, so they
+         would otherwise survive inside a token).
+      2. `split_whitespace().join(" ")` — this trims *and* collapses internal
+         whitespace runs to single spaces in one step.
+      3. Every `"` is doubled (FTS5 string escaping is `""` inside a phrase).
+      4. Wrap the result in `"`; `quote_query_prefix(input, prefix)` appends
+         `*` **outside** the closing quote: `"rust"*`.
+- [x] Both functions are `pub` in `src/query.rs` and documented (`#![warn(
+      missing_docs)]` is on). They are reachable as
+      `sakuin_md::query::quote_query` because `query` is a `pub mod`; the
+      crate-root re-export is deferred to Step 4.
+- [x] Pure unit tests in `src/query.rs`: whitespace collapsing, NUL
+      stripping, quote doubling, `AND`/`OR`/`NOT`/`NEAR`/`*`/`^`/`:`/`-`/
+      parens as literal phrase text, backslashes left untouched, unicode, the
+      prefix shape, and the documented blank-input caveat.
+- [x] One non-pure test (`quote_query_output_is_accepted_by_fts5`) runs each
+      quoted form through the bundled SQLite, so the escaping is verified
+      against the real tokenizer rather than only against expected strings.
+- [x] Verified with `cargo fmt --check`, `cargo clippy --all-targets
+      -- -D warnings`, and `cargo test`: 135 tests + 3 doctests pass, fmt and
+      clippy clean (run inside the `sakuin-dev` image built from the root
+      `Dockerfile`; see `docs/development.md`). `rustfmt` reformatted the
+      prefix helper and two test assertions, and the blank-input test caught
+      a wrong expectation of mine (`quote_query("")` is `""`, not `""""`).
 
 ### Step 4 — `SearchField` / `SearchOptions` / `SearchError`
 - [ ] New types in `src/query.rs`, re-exported from `src/lib.rs` alongside
