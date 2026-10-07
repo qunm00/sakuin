@@ -217,19 +217,32 @@ impl IndexStore {
     /// Set or update the FTS entry for a file.
     ///
     /// Because FTS5 does not support `ON DELETE CASCADE` natively, the old
-    /// row is deleted first via `DELETE` on the fts table.
+    /// row is deleted first via `DELETE` on the fts table. The delete and the
+    /// insert share one transaction, so a failing insert cannot leave the file
+    /// with no FTS row at all (which would silently drop it out of search
+    /// results until the next re-index).
     pub fn set_fts(
         &mut self,
         file_id: i64,
         title: &str,
         body: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.conn
-            .execute("DELETE FROM fts WHERE file_id = ?1", params![file_id])?;
-        self.conn.execute(
-            "INSERT INTO fts (file_id, title, body) VALUES (?1, ?2, ?3)",
-            params![file_id, title, body],
+        // The path column is populated from `files` so that it always agrees
+        // with the file record; the caller does not supply it. This lookup is a
+        // primary-key read, and it is deliberately done before the transaction
+        // so that an unknown `file_id` fails without touching the old row.
+        let relative_path: String = self.conn.query_row(
+            "SELECT relative_path FROM files WHERE id = ?1",
+            params![file_id],
+            |row| row.get(0),
         )?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM fts WHERE file_id = ?1", params![file_id])?;
+        tx.execute(
+            "INSERT INTO fts (file_id, path, title, body) VALUES (?1, ?2, ?3, ?4)",
+            params![file_id, relative_path, title, body],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -438,6 +451,74 @@ mod tests {
             tables.contains(&"fts".to_string()),
             "expected fts table, got {tables:?}"
         );
+    }
+
+    /// Migration 002 adds a `path` column to `fts`.
+    #[test]
+    fn migration_002_adds_path_column_to_fts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let store = IndexStore::open(&db_path).unwrap();
+
+        let columns: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('fts')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(columns, ["file_id", "path", "title", "body"]);
+    }
+
+    /// A database created at schema version 1 must be upgraded in place: the
+    /// existing FTS row is carried over and backfilled with the file's path.
+    #[test]
+    fn migration_002_backfills_path_into_existing_fts_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Build a database at the pre-002 schema, populated with one file.
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            new_migrations().to_version(&mut conn, 1).unwrap();
+            conn.execute(
+                "INSERT INTO files
+                    (relative_path, absolute_path, hash, size_bytes, modified_at)
+                 VALUES ('notes/rust.md', '/w/notes/rust.md', 'abc', 10, '2024-01-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+            let file_id = conn.last_insert_rowid();
+            conn.execute(
+                "INSERT INTO fts (file_id, title, body) VALUES (?1, 'Rust Notes', 'the fox')",
+                params![file_id],
+            )
+            .unwrap();
+        }
+
+        // Re-opening runs migrations up to latest.
+        let store = IndexStore::open(&db_path).unwrap();
+        let row: (String, String, String) = store
+            .conn
+            .query_row("SELECT path, title, body FROM fts", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(row.0, "notes/rust.md", "path not backfilled into fts");
+        assert_eq!(row.1, "Rust Notes", "title lost");
+        assert_eq!(row.2, "the fox", "body lost");
+
+        // The path is now searchable.
+        let hits: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH 'rust'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "path should be searchable after migration");
     }
 
     #[test]
@@ -767,7 +848,7 @@ mod tests {
         let results: Vec<(i64, String)> = store
             .conn
             .prepare(
-                "SELECT file_id, snippet(fts, 2, '<b>', '</b>', '...', 16)
+                "SELECT file_id, snippet(fts, 3, '<b>', '</b>', '...', 16)
                  FROM fts WHERE fts MATCH 'fox'",
             )
             .unwrap()

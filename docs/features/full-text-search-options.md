@@ -111,7 +111,7 @@ pub fn quote_query(input: &str) -> String;
 | `fields: []` | Treated as all fields (documented, not an error) |
 | `fields: [Path]` | Matches tokens from the file's `relative_path` only |
 | `prefix: true` | Query becomes a phrase with a trailing `*` on the last token: `"rust"*` |
-| `case_sensitive: true` | Uses the case-sensitive FTS5 table (see §3) |
+| `case_sensitive: true` | Post-filters the FTS candidates with case-sensitive `GLOB` (see §3) |
 | `snippet_tokens: 0` | Snippet suppressed → `SearchResult::snippet` is `""` |
 | empty/whitespace `query` | `Ok(vec![])` — same as today (not an error) |
 | `""` inside query | Escaped by `quote_query`, never a syntax error |
@@ -133,13 +133,13 @@ CREATE VIRTUAL TABLE fts USING fts5(
 );
 ```
 
-Two capabilities need data the table does not have: the **path** column and a
-**case-sensitive** variant.
+One capability needs data the table does not have: the **path** column. The
+**case-sensitive** variant turned out not to need a schema change at all — see
+"Case sensitivity" below.
 
 ### Migration `002-fts-fields/up.sql`
 
 ```sql
--- 1. Case-insensitive table, now including the file path as a searchable column.
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_new USING fts5(
     file_id UNINDEXED,
     path,
@@ -154,31 +154,56 @@ FROM fts JOIN files ON files.id = fts.file_id;
 
 DROP TABLE fts;
 ALTER TABLE fts_new RENAME TO fts;
-
--- 2. Case-sensitive mirror, same content, ASCII/unicode tokeniser without
---    case folding. `porter` is intentionally NOT used here: it folds case.
-CREATE VIRTUAL TABLE IF NOT EXISTS fts_case USING fts5(
-    file_id UNINDEXED,
-    path,
-    title,
-    body,
-    tokenize = "unicode61 tokenchars '_' remove_diacritics 2 case_sensitive 1"
-);
-INSERT INTO fts_case (file_id, path, title, body)
-SELECT file_id, path, title, body FROM fts;
 ```
 
-`002-fts-fields/down.sql` recreates the original two-column table and drops
-`fts_case`.
+`002-fts-fields/down.sql` recreates the original two-column table.
 
-### Trade-offs accepted
+### Case sensitivity — no second table
 
-- **Storage doubles** for the FTS content. Accepted for now: it is the only
-  portable way to get true case sensitivity in FTS5 (SQLite exposes
-  `case_sensitive` only as a *table* option). Documented as a known cost; a
-  future option could make `fts_case` opt-in at index build time.
-- **Write path doubles.** `IndexStore::set_fts` and the delete helpers must
-  touch both tables in the same transaction (see §4).
+An earlier draft of this plan added an `fts_case` mirror table using
+`tokenize = "unicode61 … case_sensitive 1"`. **That option does not exist.**
+`case_sensitive` is a `trigram`-only tokenizer option. In the bundled SQLite
+(`libsqlite3-sys` 0.38.2, SQLite 3.53.2) `fts5UnicodeCreate` accepts exactly
+four options — `remove_diacritics`, `tokenchars`, `separators`,
+`categories` — and folds case unconditionally through a hardcoded fold table.
+Creating the table fails outright with *"error in tokenizer constructor"*.
+
+Since `porter` also folds case, there is no way to make a `unicode61` FTS5
+table case-sensitive, and therefore no table-based design for this feature.
+
+The approach actually used is a **two-stage query**:
+
+1. `fts MATCH ?` generates candidates with the normal case-insensitive index
+   (cheap, uses the inverted index).
+2. A case-sensitive `GLOB` filter re-checks the candidate rows' stored text.
+   `GLOB` is case-sensitive where `LIKE` is not.
+
+```sql
+SELECT … FROM fts JOIN files f ON f.id = fts.file_id
+WHERE fts.file_id IN (SELECT file_id FROM fts WHERE fts MATCH ?1)
+  AND (fts.title GLOB ?2 OR fts.body GLOB ?2 OR f.relative_path GLOB ?2)
+```
+
+with `?2` bound to `*query*`. Verified against the bundled SQLite: searching
+`indexer` returns the row containing `Indexer`, and the `*Indexer*` GLOB filter
+selects it while `*indexer*` selects nothing.
+
+Trade-offs:
+
+- **Candidate set is broader than the final result**, so `limit`/`offset` must
+  be applied *after* the `GLOB` filter, not pushed into SQL. The `GLOB` step
+  degrades to a scan of the candidate rows; that is fine at typical candidate
+  sizes but is O(candidates), not O(log n).
+- **Substring, not token, matching.** `GLOB` matches anywhere in the text,
+  whereas FTS5 matches whole tokens. For code identifiers that is arguably the
+  more useful behaviour, but it is a semantic difference and must be
+  documented on the option.
+- **Wildcards in the query need escaping** — a user searching for `*` would
+  otherwise produce a degenerate pattern. `quote_query` must escape
+  `*`/`?`/`[` in the GLOB pattern (but *not* in the FTS5 MATCH argument).
+
+### Other trade-offs
+
 - **Index rebuild required** for existing databases. `IndexStore::open`
   already runs `rusqlite_migration`, so the upgrade is automatic; no
   re-indexing is needed because migration 002 backfills from `files`.
@@ -187,25 +212,26 @@ SELECT file_id, path, title, body FROM fts;
 
 ## 4. Implementation steps
 
-### Step 1 — Migration
-- [ ] `migrations/002-fts-fields/{up,down}.sql` as above.
-- [ ] Confirm `rusqlite_migration`'s `from-directory` picks up the new folder
+### Step 1 — Migration ✅
+- [x] `migrations/002-fts-fields/{up,down}.sql` as above.
+- [x] Confirm `rusqlite_migration`'s `from-directory` picks up the new folder
       automatically (it does — no registry change needed).
-- [ ] Store-side test: open a store, index a file, assert the path is
-      searchable and `fts_case` holds a row.
+- [x] Store-side tests: `migration_002_adds_path_column_to_fts` asserts the
+      column layout; `migration_002_backfills_path_into_existing_fts_rows`
+      builds a database at version 1, populates it, and asserts the upgrade
+      backfills `path` and leaves the path searchable.
+- [x] Interim shim so the tree stays green: `set_fts` now looks up
+      `relative_path` from `files` and writes it, and the two `snippet(fts, 2, …)`
+      call sites (in `query.rs` and `store/mod.rs` tests) moved to column `3`,
+      since `body` shifted from index 2 to 3. Verified with the full CI gate
+      on a real toolchain: 125 tests pass, `cargo fmt --check` and
+      `cargo clippy -D warnings` clean.
 
-### Step 2 — Store write path (`src/store/mod.rs`)
-- [ ] `set_fts(file_id, title, body)` gains the path internally: it looks up
-      `relative_path` from `files` and writes `(file_id, path, title, body)`
-      into **both** `fts` and `fts_case` in one transaction.
-      To avoid changing the public signature, look up the path inside
-      `set_fts`; if that costs a lookup on the hot path, add a
-      `set_fts_with_path` and keep `set_fts` as a thin wrapper.
-- [ ] Deletion of a file cascades into `fts`/`fts_case` — the tables are
-      contentless-free (they store `file_id` as `UNINDEXED`), so the existing
-      `ON DELETE CASCADE` from `files` does **not** apply. Add explicit
-      `DELETE FROM fts WHERE file_id = ?` / `fts_case` wherever `set_fts`
-      previously deleted, and verify the file-removal test still passes.
+### Step 2 — Store write path (`src/store/profile` cleanup) ✅ (done as part of step 1)
+- [x] `set_fts(file_id, title, body)` looks up `relative_path` from `files` and
+      writes `(file_id, path, title, body)`. Public signature unchanged.
+- [x] `delete_file` already deletes from `fts` explicitly; no second table to
+      keep in sync. The original concern about `fts_case` is moot.
 
 ### Step 3 — `quote_query` (`src/query.rs`)
 - [ ] Implementation:
@@ -254,7 +280,8 @@ SELECT file_id, path, title, body FROM fts;
       - `LIMIT ?2` is bound to `-1` when `limit` is `None` (`i64`).
       - `snippet(...)` and `bm25(...)` reference the table by its real name so
         the `column` argument of `snippet` is the *body* column index, which
-        is now `3`; compute it from the field list instead of hard-coding.
+        is now `3` after migration 002; compute it from the field list instead
+        of hard-coding.
       - When `snippet_tokens == 0`, bind an empty snippet via
         `CASE WHEN ?tokens = 0 THEN '' ELSE snippet(...) END` to keep a single
         prepared-statement shape (simpler than two SQL strings).
@@ -262,7 +289,10 @@ SELECT file_id, path, title, body FROM fts;
         (path, title, body) by default; a future `SearchOptions::with_weights`
         is out of scope. Document that `rank` semantics are unchanged
         (lower is better) even though the weight vector differs.
-- [ ] Table selection: `fts_case` when `case_sensitive`, else `fts`.
+- [ ] Case sensitivity: when `case_sensitive` is set, add the `GLOB` filter
+      from §3 to the `WHERE` clause, with a `*`-escaped pattern bound as a
+      parameter. Because it filters candidates, `LIMIT`/`OFFSET` can still be
+      pushed into SQL — the `GLOB` runs before `LIMIT` in the same statement.
 - [ ] Blank query → `Ok(Vec::new())` before any SQL is built.
 - [ ] Fields→column projection helper:
       `fn selected_fields(fields: &[SearchField]) -> Vec<SearchField>`
@@ -281,11 +311,11 @@ SELECT file_id, path, title, body FROM fts;
 
 ### Step 7 — Docs, examples, benches
 - [ ] README: new "Search" section showing the builder and a table of
-      options; schema bullet updated (`fts`, `fts_case`).
+      options; schema bullet updated (`fts` now carries `path`).
 - [ ] `examples/basic-index.rs`: demonstrate paging (`limit`/`offset`) and a
       prefix query.
 - [ ] `benches/bench_index.rs`: add a `search_prefix` criterion.
-- [ ] `docs/design.md`: note the second FTS table in the storage section.
+- [ ] `docs/design.md`: note the `path` column in the storage section.
 
 ---
 
@@ -301,7 +331,8 @@ SELECT file_id, path, title, body FROM fts;
 - `prefix: true` matches `docu` but plain search does not; `prefix` on a
   multi-word phrase still requires the full phrase (documented behaviour).
 - `case_sensitive: true`: `Indexer` matches, `indexer` does not; and the
-  reverse for the default.
+  reverse for the default. Also test a `*` in the query to confirm it cannot
+  corrupt the `GLOB` pattern.
 - `snippet_tokens`: `0` → empty snippet; larger values produce longer
   snippets (compare lengths on a long-body fixture).
 - Errors: `""`/`"   "` → `Ok(empty)`; `"unterminated` → `InvalidQuery`;
@@ -312,8 +343,8 @@ SELECT file_id, path, title, body FROM fts;
 ### Integration tests (`tests/search_options.rs`, new)
 Build a temp workspace via the public `Indexer` API (no store internals), then
 assert the same matrix end-to-end. This is the layer that catches a migration
-that works in unit tests but does not populate `fts_case` for files indexed
-through the watcher path.
+that works in unit tests but leaves `path` empty for files indexed through the
+watcher path.
 
 ### Property tests (`proptest`, already a dev-dependency)
 - `quote_query(p)` output always parses: feeding arbitrary input to
@@ -322,9 +353,10 @@ through the watcher path.
 - Ranking is deterministic across repeated identical queries.
 
 ### CI
-Unchanged: `cargo fmt --check`, `cargo clippy -D warnings`,
-`cargo build --all-targets`, `cargo test`. Cannot be run locally on this
-machine (no Rust toolchain) — verification happens on the user's side.
+`cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --all-targets`,
+`cargo test`. These can be run locally — see `docs/development.md` for
+environment setup. Verified green on this machine (2026-09-23): 125 tests
+pass, fmt and clippy clean.
 
 ---
 
@@ -332,9 +364,10 @@ machine (no Rust toolchain) — verification happens on the user's side.
 
 | Risk | Mitigation |
 | --- | --- |
-| Migration doubles FTS storage | Documented; `fts_case` is a plain table that can be dropped and re-created by a future opt-in flag |
-| FTS5 syntax-error detection is a string heuristic | Single helper, unit-tested against the bundled SQLite, comment warns about SQLite upgrades |
+| Case-sensitive `GLOB` filter is O(candidates) | Only paid when `case_sensitive` is explicitly requested; default path is unchanged. Document as a known cost. |
+| `GLOB` is substring- not token-matching | Documented on the option; arguably desirable for code identifiers. |
 | `bm25` weight change alters `rank` values | Relative ordering is preserved (body still heaviest); document, and add a regression test on ordering, not on exact score |
+| FTS5 syntax-error detection is a string heuristic | Single helper, unit-tested against the bundled SQLite, comment warns about SQLite upgrades |
 | Deleting from a non-contentless FTS table on file removal | Explicit `DELETE ... WHERE file_id = ?` in the same transaction; covered by a new store test |
 | Dynamic SQL invites injection | Only the quoted query string is interpolated; document and test with a payload like `"; DROP TABLE files; --` |
 | `snippet()` column index shifts when `path` is inserted | Derive the index from the field list, and assert snippet content in tests (not just shape) |

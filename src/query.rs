@@ -176,7 +176,7 @@ impl<'conn> Query<'conn> {
             "SELECT f.id, f.relative_path,
                     CASE WHEN fts.title IS NULL OR fts.title = ''
                          THEN f.relative_path ELSE fts.title END,
-                    snippet(fts, 2, '<b>', '</b>', '...', 16),
+                    snippet(fts, 3, '<b>', '</b>', '...', 16),
                     bm25(fts)
              FROM fts
              JOIN files f ON f.id = fts.file_id
