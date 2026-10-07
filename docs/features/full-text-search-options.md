@@ -260,20 +260,44 @@ Trade-offs:
       prefix helper and two test assertions, and the blank-input test caught
       a wrong expectation of mine (`quote_query("")` is `""`, not `""""`).
 
-### Step 4 — `SearchField` / `SearchOptions` / `SearchError`
-- [ ] New types in `src/query.rs`, re-exported from `src/lib.rs` alongside
-      the existing `pub use query::{…}` list.
-- [ ] `#![warn(missing_docs)]` is on: every public item and every enum variant
-      needs a doc comment.
-- [ ] `SearchError::InvalidQuery` is produced for: blank query, and backend
-      errors recognised as FTS5 syntax errors — detect via
-      `rusqlite::Error::SqliteFailure(_, Some(message))` where the message
-      contains `"fts5"` / `"malformed MATCH"` / `"syntax error near"`.
-      Everything else maps to `Backend`. Heuristic lives in one private helper
-      `fn is_query_syntax_error(error: &rusqlite::Error) -> bool`, with a
-      comment noting it is a heuristic and may need updating on SQLite bumps.
-- [ ] Unit test for the classifier against messages produced by the bundled
-      SQLite (unbalanced quote, `NEAR` misuse).
+### Step 4 — `SearchField` / `SearchOptions` / `SearchError` ✅
+- [x] New types in `src/query.rs`, re-exported from `src/lib.rs` alongside
+      the existing `pub use query::{…}` list (`quote_query` and
+      `quote_query_prefix` are re-exported too, so applications never need to
+      reach into the module).
+- [x] `#![warn(missing_docs)]` is on: every public item and every enum variant
+      has a doc comment.
+- [x] `SearchError::InvalidQuery` is produced for: blank query, and backend
+      errors recognised as FTS5 syntax errors — via the private helper
+      `fn is_query_syntax_error(error: &rusqlite::Error) -> bool`, which
+      matches on `rusqlite::Error::SqliteFailure(_, Some(message))`.
+- [x] The heuristics were **captured from the bundled SQLite** with a
+      throwaway probe rather than guessed. The real messages are:
+
+      | Query | Message | Matched? |
+      | --- | --- | --- |
+      | `"`, `a b"` | `unterminated string` | yes (`unterminated string`) |
+      | `NEAR/2` | `fts5: syntax error near "/"` | yes (`fts5:`) |
+      | `a AND`, `(a`, `""` (empty phrase) | `fts5: syntax error near ""` | yes (`fts5:`) |
+      | `*` | `unknown special query: ` | yes (`unknown special query`) |
+      | `nosuchcol:fox` | `no such column: nosuchcol` | **no** → `Backend` |
+      | missing table | `no such table: files` | **no** → `Backend` |
+
+      `malformed match` is also matched defensively; the bundled SQLite does
+      not currently emit it.
+- [x] The doc comment on `is_query_syntax_error` carries the message table,
+      states that it is a heuristic that must be re-captured on a SQLite
+      upgrade, and explains that unrecognised errors fall back to `Backend`
+      because that is the safe direction.
+- [x] Classifier tests run the queries through the real FTS5 table and assert
+      on the resulting classification, rather than on hand-written
+      `SqliteFailure` values alone.
+- [x] Verified: `cargo fmt --check`, `cargo clippy --all-targets
+      -- -D warnings`, and `cargo test` — 144 tests + 4 doctests pass.
+      The run corrected a factual error: FTS5 *accepts* the two-character
+      phrase `""` (a zero-token phrase matching nothing) — only `""""` is a
+      syntax error — so the `quote_query` doc no longer claims blank input
+      produces an unmatchable query.
 
 ### Step 5 — `search_with_options`
 - [ ] Build the SQL dynamically (the column list and the `bm25` weights are

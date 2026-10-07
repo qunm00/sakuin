@@ -196,6 +196,192 @@ impl<'conn> Query<'conn> {
     }
 }
 
+// ── Search options ─────────────────────────────────────
+
+/// Which columns a search query is allowed to match.
+///
+/// These map onto the columns of the `fts` FTS5 table introduced by migration
+/// `002-fts-fields`: `path`, `title`, and `body`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SearchField {
+    /// The file's path relative to the workspace root (`files.relative_path`).
+    Path,
+    /// The document title.
+    Title,
+    /// The indexed body text.
+    Body,
+}
+
+/// Tuning knobs for [`Query::search_with_options`].
+///
+/// [`SearchOptions::new`] (and [`Default`]) search every field, are
+/// case-insensitive, return every match, and build a 16-token snippet — that
+/// is, the behaviour of [`Query::search`].
+///
+/// ```
+/// # use sakuin_md::{SearchOptions, SearchField};
+/// let fields = [SearchField::Path];
+/// let options = SearchOptions::new().with_limit(20).with_fields(&fields);
+/// assert_eq!(options.limit, Some(20));
+/// assert_eq!(options.offset, 0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SearchOptions<'a> {
+    /// Maximum number of results. `None` means unlimited, which is the
+    /// behaviour of the un-paged [`Query::search`].
+    pub limit: Option<usize>,
+    /// Number of leading results to skip. Combined with `limit` this pages
+    /// through the result set; an `offset` past the end returns no results.
+    pub offset: usize,
+    /// Columns the query may match. An empty slice means every column.
+    pub fields: &'a [SearchField],
+    /// Treat the query as a prefix query, so `docu` also matches `document`.
+    pub prefix: bool,
+    /// Require the matched text to have the same case as the query. Useful for
+    /// code identifiers, where `Indexer` and `indexer` are different things.
+    pub case_sensitive: bool,
+    /// Approximate snippet length, in FTS5 tokens. `0` suppresses snippets
+    /// entirely and yields an empty `SearchResult::snippet`.
+    pub snippet_tokens: usize,
+}
+
+impl Default for SearchOptions<'_> {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            offset: 0,
+            fields: &[],
+            prefix: false,
+            case_sensitive: false,
+            snippet_tokens: 16,
+        }
+    }
+}
+
+impl<'a> SearchOptions<'a> {
+    /// Options equivalent to the current behaviour of [`Query::search`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the maximum number of results.
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set the number of leading results to skip.
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Restrict matching to `fields`. An empty slice means every field.
+    pub fn with_fields(mut self, fields: &'a [SearchField]) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    /// Set whether the query is a prefix query.
+    pub fn with_prefix(mut self, prefix: bool) -> Self {
+        self.prefix = prefix;
+        self
+    }
+
+    /// Set whether matching is case-sensitive.
+    pub fn with_case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.case_sensitive = case_sensitive;
+        self
+    }
+
+    /// Set the approximate snippet length, in tokens. `0` suppresses snippets.
+    pub fn with_snippet_tokens(mut self, snippet_tokens: usize) -> Self {
+        self.snippet_tokens = snippet_tokens;
+        self
+    }
+}
+
+/// Error type for the typed search API.
+///
+/// This exists so that a caller can tell "the user typed something FTS5 cannot
+/// parse" apart from "the database failed", without matching on message text.
+#[derive(Debug)]
+pub enum SearchError {
+    /// The query was empty or whitespace only, or produced an FTS5 syntax
+    /// error. The payload is a human-readable explanation.
+    InvalidQuery(String),
+    /// The underlying SQLite operation failed for a reason unrelated to the
+    /// query text.
+    Backend(rusqlite::Error),
+}
+
+impl std::fmt::Display for SearchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchError::InvalidQuery(message) => write!(formatter, "invalid query: {message}"),
+            SearchError::Backend(error) => write!(formatter, "search failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SearchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SearchError::InvalidQuery(_) => None,
+            SearchError::Backend(error) => Some(error),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for SearchError {
+    fn from(error: rusqlite::Error) -> Self {
+        if is_query_syntax_error(&error) {
+            SearchError::InvalidQuery(error.to_string())
+        } else {
+            SearchError::Backend(error)
+        }
+    }
+}
+
+/// Decide whether a SQLite error is the caller's fault (bad query text) rather
+/// than a backend failure.
+///
+/// This is a **heuristic on message text**, because FTS5 reports syntax
+/// problems through `SQLITE_ERROR` with no dedicated extended code. The
+/// patterns below are the ones the bundled SQLite actually produces; a future
+/// SQLite version may word them differently, so the unit tests assert against
+/// messages captured from this SQLite build and should be re-captured on an
+/// upgrade. Anything unrecognised is treated as a backend error, which is the
+/// safe direction: a mis-classified *backend* error merely shows up as an
+/// `InvalidQuery`, whereas the reverse would hide real failures.
+///
+/// Known messages, from `libsqlite3-sys` 0.38.x (SQLite 3.53.x):
+///
+/// | Query | Message |
+/// | --- | --- |
+/// | `"`, `a b"` | `unterminated string` |
+/// | `NEAR/2` | `fts5: syntax error near "/"` |
+/// | `a AND`, `(a` | `fts5: syntax error near ""` |
+/// | `*` | `unknown special query: ` |
+/// | `""` (empty phrase) | `fts5: syntax error near ""` |
+///
+/// Deliberately *not* matched: `no such table: …` and `no such column: …`.
+/// Those indicate a schema or code problem, not a bad query.
+fn is_query_syntax_error(error: &rusqlite::Error) -> bool {
+    let rusqlite::Error::SqliteFailure(_, Some(message)) = error else {
+        return false;
+    };
+    let message = message.to_lowercase();
+    [
+        "fts5:",
+        "malformed match",
+        "unterminated string",
+        "unknown special query",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
 // ── Data types ─────────────────────────────────────────
 
 /// Metadata about an indexed file, as returned by the query API.
@@ -355,11 +541,11 @@ fn escape_like(input: &str) -> String {
 ///    token a prefix match.
 ///
 /// The output is a phrase, not a bareword, so it is never affected by the
-/// caller's surrounding text. Note that `quote_query` does **not** guarantee
-/// a matchable query on its own: input that is empty or entirely whitespace
-/// yields `""` (an empty phrase), which FTS5 does not accept. Callers must
-/// reject blank input before building SQL — see
-/// [`Query::search`](Query::search), which returns an empty result for it.
+/// caller's surrounding text. Input that is empty or entirely whitespace
+/// yields `""`, a zero-token phrase that FTS5 accepts and that matches
+/// nothing; callers that want a blank query to be a no-op should reject it up
+/// front rather than rely on that — see [`Query::search`], which returns an
+/// empty result for blank input.
 ///
 /// # Examples
 ///
@@ -413,6 +599,166 @@ mod tests {
     use super::*;
     use crate::parser::{Parser, extract_tags_from_frontmatter};
     use crate::store::{FileInfo, IndexStore};
+    use std::error::Error;
+
+    // ── SearchOptions ────────────────────────────────
+
+    #[test]
+    fn search_options_defaults_match_todays_behaviour() {
+        let options = SearchOptions::new();
+        assert_eq!(options.limit, None);
+        assert_eq!(options.offset, 0);
+        assert!(options.fields.is_empty());
+        assert!(!options.prefix);
+        assert!(!options.case_sensitive);
+        assert_eq!(options.snippet_tokens, 16);
+        assert_eq!(options.limit, SearchOptions::default().limit);
+        assert_eq!(
+            options.snippet_tokens,
+            SearchOptions::default().snippet_tokens
+        );
+    }
+
+    #[test]
+    fn search_options_builders_set_each_field() {
+        let fields = [SearchField::Path, SearchField::Title];
+        let options = SearchOptions::new()
+            .with_limit(5)
+            .with_offset(10)
+            .with_fields(&fields)
+            .with_prefix(true)
+            .with_case_sensitive(true)
+            .with_snippet_tokens(3);
+        assert_eq!(options.limit, Some(5));
+        assert_eq!(options.offset, 10);
+        assert_eq!(options.fields, &fields);
+        assert!(options.prefix);
+        assert!(options.case_sensitive);
+        assert_eq!(options.snippet_tokens, 3);
+    }
+
+    #[test]
+    fn search_options_builders_can_be_overridden() {
+        // Builders consume and return `self`, so the last call wins.
+        let options = SearchOptions::new()
+            .with_prefix(true)
+            .with_prefix(false)
+            .with_limit(1)
+            .with_limit(2);
+        assert!(!options.prefix);
+        assert_eq!(options.limit, Some(2));
+    }
+
+    // ── SearchError ──────────────────────────────────
+
+    #[test]
+    fn search_error_display_mentions_the_problem() {
+        let invalid = SearchError::InvalidQuery("unterminated string".to_string());
+        assert!(invalid.to_string().contains("invalid query"));
+        assert!(invalid.to_string().contains("unterminated string"));
+        assert!(invalid.source().is_none());
+    }
+
+    #[test]
+    fn search_error_backend_exposes_the_rusqlite_error_as_source() {
+        let error = SearchError::Backend(rusqlite::Error::InvalidColumnIndex(3));
+        assert!(error.to_string().contains("search failed"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn search_error_from_rusqlite_classifies_syntax_errors() {
+        let error: SearchError = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("fts5: syntax error near \"\"".to_string()),
+        )
+        .into();
+        assert!(matches!(error, SearchError::InvalidQuery(_)));
+    }
+
+    #[test]
+    fn search_error_from_rusqlite_keeps_backend_errors_as_backend() {
+        let error: SearchError = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some("no such table: files".to_string()),
+        )
+        .into();
+        assert!(matches!(error, SearchError::Backend(_)));
+    }
+
+    // ── is_query_syntax_error ────────────────────────
+
+    /// Feed `query` to the real FTS5 table and classify whatever comes back.
+    fn classify_fts_error(store: &IndexStore, query: &str) -> bool {
+        let error = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH ?1",
+                params![query],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect_err("probe query was expected to fail");
+        is_query_syntax_error(&error)
+    }
+
+    #[test]
+    fn is_query_syntax_error_accepts_the_messages_fts5_actually_produces() {
+        // These are the exact messages the bundled SQLite produces; see the
+        // table on `is_query_syntax_error`. Re-capture them when SQLite is
+        // upgraded.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+        index_workspace(&mut store, &[("notes/rust.md", "# Rust\n\nthe fox jumps")]);
+
+        for query in [
+            "\"",
+            "\"unterminated",
+            "a b\"",
+            "NEAR/2",
+            "a AND",
+            "(a",
+            "a OR",
+            "*",
+            "\"\"\"",
+            "",
+        ] {
+            assert!(
+                classify_fts_error(&store, query),
+                "query {query:?} should be classified as a query error"
+            );
+        }
+    }
+
+    #[test]
+    fn is_query_syntax_error_rejects_real_backend_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = IndexStore::open(&dir.path().join("test.db")).unwrap();
+
+        // A missing table is a backend problem, not a user mistake.
+        let missing_table = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM no_such_table", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect_err("query against a missing table must fail");
+        assert!(!is_query_syntax_error(&missing_table));
+
+        // So is an unknown column filter in the query.
+        let missing_column = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts WHERE fts MATCH 'nosuchcol:fox'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect_err("unknown column filter must fail");
+        assert!(!is_query_syntax_error(&missing_column));
+
+        // And so is a non-SQLite rusqlite error.
+        assert!(!is_query_syntax_error(
+            &rusqlite::Error::InvalidColumnIndex(3)
+        ));
+    }
 
     // ── quote_query ──────────────────────────────────
 
@@ -471,8 +817,9 @@ mod tests {
 
     #[test]
     fn quote_query_of_blank_input_is_an_empty_phrase() {
-        // Documented caveat: callers must reject blank input before building
-        // SQL, because FTS5 does not accept an empty phrase.
+        // FTS5 accepts the zero-token phrase `""`; it simply matches nothing.
+        // Callers still short-circuit blank input (see `Query::search`), but
+        // the escaper does not need to defend against it.
         assert_eq!(quote_query(""), "\"\"");
         assert_eq!(quote_query("   \t\n"), "\"\"");
     }
@@ -502,9 +849,8 @@ mod tests {
         let mut store = IndexStore::open(&dir.path().join("test.db")).unwrap();
         index_workspace(&mut store, &[("notes/rust.md", "# Rust\n\nthe fox jumps")]);
 
-        // Blank input is deliberately absent: it is rejected by the caller
-        // before any SQL is built (see `Query::search`), so it never reaches
-        // FTS5.
+        // Blank input is deliberately absent: `Query::search` returns an empty
+        // result for it before any SQL is built, so it never reaches FTS5.
         for input in [
             "\"",
             "NEAR",

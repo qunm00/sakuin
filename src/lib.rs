@@ -49,5 +49,8 @@ pub mod watcher;
 mod helpers;
 
 pub use query::LinkType;
+pub use query::quote_query;
+pub use query::quote_query_prefix;
 pub use query::{FileEntry, HeadingEntry, LinkEntry, LinkFilter, Query, SearchResult};
+pub use query::{SearchError, SearchField, SearchOptions};
 pub use watcher::WatchEvent;
