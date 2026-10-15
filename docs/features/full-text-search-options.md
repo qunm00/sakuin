@@ -339,7 +339,7 @@ Trade-offs:
       Internal tests moved to `try_search`, and one `#[allow(deprecated)]` test
       pins the old passthrough behaviour (operators honoured, unbalanced quote
       is a backend error).
-- [ ] README migration note: still outstanding (Step 7).
+- [x] README migration note (Step 7).
 
 ### Findings that changed the design
 
@@ -366,54 +366,76 @@ Trade-offs:
   nothing); only `""""` is a syntax error. Recorded in Step 3 above.
 
 
-### Step 7 — Docs, examples, benches
-- [ ] README: new "Search" section showing the builder and a table of
-      options; schema bullet updated (`fts` now carries `path`).
-- [ ] `examples/basic-index.rs`: demonstrate paging (`limit`/`offset`) and a
-      prefix query.
-- [ ] `benches/bench_index.rs`: add a `search_prefix` criterion.
-- [ ] `docs/design.md`: note the `path` column in the storage section.
+### Step 7 — Docs, examples, benches ✅
+- [x] README: new "Search" section with a builder example, an options table,
+      the two caveats (prefix matches stems, case sensitivity only narrows),
+      and a "Migrating from `Query::search`" note with an old-to-new table.
+- [x] README schema bullet updated to say `fts` now carries `path`.
+- [x] `examples/basic-index.rs`: paging, prefix, and field-restricted queries.
+- [x] `benches/bench_index.rs`: `bench_search` with `exact query` and
+      `search_prefix` cases.
+- [x] `docs/design.md`: the `fts` definition includes `path`, and the `Query`
+      API listing shows `try_search` / `search_with_options` with `search`
+      marked deprecated.
 
 ---
 
-## 5. Testing strategy
+## 5. Testing strategy — as implemented
 
 ### Unit tests (`src/query.rs` `#[cfg(test)]`)
-- `quote_query`: table-driven cases (see Step 3).
-- `search_with_options` default options equals `try_search` results.
-- `limit`/`offset`: 0, 1, 5, `None`; `offset` past the end → empty; paging is
-  stable (page 1 + page 2 has no overlap and no gaps, ordered by path).
-- `fields`: `[Path]` matches only files whose path contains the term;
-  `[Title]`; `[Body]`; `[]` == all three.
-- `prefix: true` matches `docu` but plain search does not; `prefix` on a
-  multi-word phrase still requires the full phrase (documented behaviour).
-- `case_sensitive: true`: `Indexer` matches, `indexer` does not; and the
-  reverse for the default. Also test a `*` in the query to confirm it cannot
-  corrupt the `GLOB` pattern.
-- `snippet_tokens`: `0` → empty snippet; larger values produce longer
-  snippets (compare lengths on a long-body fixture).
-- Errors: `""`/`"   "` → `Ok(empty)`; `"unterminated` → `InvalidQuery`;
-  closed connection → `Backend`.
-- Regression: results from `search_with_options` are a prefix of results from
-  the old `search` for the same query, for the default options.
+- `quote_query`: whitespace, NUL, quotes, backslashes, operators as literal
+  text, unicode, the prefix shape, the blank-input case, plus one test that
+  runs every form through the real bundled SQLite.
+- `selected_fields`: empty means all, and the result keeps table order so the
+  BM25 weight vector stays aligned.
+- `escape_glob`: every metacharacter, including a trailing backslash.
+- `SearchOptions`: defaults match today's behaviour; builders set each field
+  and can be overridden.
+- `SearchError`: `Display`, `source`, `From<rusqlite::Error>` classification.
+- `is_query_syntax_error`: driven through the real FTS table for every
+  message the bundled SQLite emits, plus `no such table` / `no such column`
+  classified as `Backend`.
+- `search_with_options`: defaults, field restriction (including empty list),
+  paging (`limit`, `offset`, past-the-end, combined), prefix, case
+  sensitivity (casing, per-field narrowing, narrowing-only limitation,
+  wildcards, paging interaction), snippet suppression and length, blank
+  queries, hostile input never erroring, and determinism across repeated runs.
+- `deprecated_search_still_passes_the_query_through_verbatim` pins the old
+  behaviour: operators honoured, unbalanced quote is a backend error.
 
-### Integration tests (`tests/search_options.rs`, new)
-Build a temp workspace via the public `Indexer` API (no store internals), then
-assert the same matrix end-to-end. This is the layer that catches a migration
-that works in unit tests but leaves `path` empty for files indexed through the
-watcher path.
+### Integration tests (`tests/search_options.rs`) ✅
+11 tests through the public `Indexer` API only (no store internals): field
+restriction, paging, prefix/case options, snippet length, blank and hostile
+queries, watcher-path indexing, removals, rescan convergence, reopening an
+existing database, and a short live-watch smoke test. This is the layer that
+catches a migration which works in unit tests but leaves `path` empty for
+files indexed through the watcher path.
 
-### Property tests (`proptest`, already a dev-dependency)
-- `quote_query(p)` output always parses: feeding arbitrary input to
-  `search_with_options` never yields `InvalidQuery`.
-- `limit = n, offset = k` returns exactly `min(n, max(0, total - k))` rows.
-- Ranking is deterministic across repeated identical queries.
+### Property tests (`tests/search_properties.rs`) ✅
+Four properties over a hostile-input strategy built from FTS5 operators, GLOB
+wildcards, quotes, NUL, and non-ASCII fragments:
+- `quote_query_always_parses` — no input produces an FTS5 syntax error.
+- `quote_query_prefix_always_parses` — same, with the prefix marker appended.
+- `quote_query_is_reversible` — unescaping the phrase returns the input with
+  whitespace collapsed and NUL removed.
+- `hostile_queries_cannot_widen_the_result_set` — the single indexed row is
+  returned only when the query literally spells out its text.
+
+Two findings while writing these:
+- The tests reach raw `MATCH` through the deprecated `Query::search`, because
+  `IndexStore::conn` is private and integration tests cannot touch it.
+- The fixture text is a nonsense token (`qqzzz`) rather than a real word.
+  `porter` reduces `zebrae` to `zebra` and `unicode61` folds diacritics, so a
+  real word is reachable from inputs that have nothing to do with escaping;
+  the property is only precise when no other input can stem to the indexed
+  token.
 
 ### CI
-`cargo fmt --check`, `cargo clippy -D warnings`, `cargo build --all-targets`,
-`cargo test`. These can be run locally — see `docs/development.md` for
-environment setup. Verified green on this machine (2026-09-23): 125 tests
-pass, fmt and clippy clean.
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo build --all-targets`, `cargo test`. All four run inside the
+`sakuin-dev` image built from the root `Dockerfile` (see
+`docs/development.md`). Verified green: 165 unit + 11 integration + 4
+property + 4 doctests.
 
 ---
 

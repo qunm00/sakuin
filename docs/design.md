@@ -167,8 +167,13 @@ CREATE TABLE IF NOT EXISTS tags (
 
 -- ── Full-Text Search ──────────────────────────────────
 -- Using FTS5 for efficient content search.
+-- `path` was added by migration 002 so a query can be restricted to (or
+-- weighted towards) a file's path relative to the workspace root. FTS5
+-- virtual tables cannot be ALTERed, so that migration recreated the table and
+-- copied the rows across.
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(
     file_id UNINDEXED,
+    path,
     title,
     body,
     tokenize='porter unicode61'
@@ -323,8 +328,20 @@ impl<'conn> Query<'conn> {
     /// Backlinks: files that link *to* a given target (e.g., a wikilink target).
     pub fn backlinks(&self, target: &str) -> Result<Vec<LinkEntry>>;
 
-    /// Full-text search across all indexed files.
-    /// Returns ranked results using FTS5 BM25 scoring.
+    /// Full-text search with the default options and a typed error.
+    /// The query is escaped, so it is matched as literal text.
+    pub fn try_search(&self, query: &str) -> Result<Vec<SearchResult>, SearchError>;
+
+    /// Full-text search with field restriction, paging, prefix matching,
+    /// case sensitivity, and snippet length.
+    pub fn search_with_options(
+        &self,
+        query: &str,
+        options: &SearchOptions<'_>,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+
+    /// Deprecated raw-FTS5 passthrough: the query reaches FTS5 verbatim.
+    #[deprecated(note = "use try_search or search_with_options")]
     pub fn search(&self, query: &str) -> Result<Vec<SearchResult>>;
 }
 

@@ -5,6 +5,7 @@
 //! workspace should cost roughly N times a single incremental update.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use sakuin_md::SearchOptions;
 use sakuin_md::indexer::Indexer;
 use sakuin_md::watcher::WatchEvent;
 use std::hint::black_box;
@@ -81,5 +82,40 @@ fn bench_incremental_update(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_full_reindex, bench_incremental_update);
+/// Search cost on the same synthetic workspace: a plain exact-token query
+/// against a prefix query.
+///
+/// A prefix query has to walk the term index instead of looking terms up, so
+/// it is expected to cost more than the exact query; the point of the bench is
+/// to make that visible if it changes.
+fn bench_search(c: &mut Criterion) {
+    let workspace = tempfile::tempdir().unwrap();
+    build_workspace(workspace.path(), FILE_COUNT);
+    let db = workspace.path().join("search.db");
+    let mut indexer = Indexer::open(workspace.path(), &db).unwrap();
+    indexer.scan_full().unwrap();
+    let query = indexer.query();
+
+    let mut group = c.benchmark_group("search");
+    group.bench_function("exact query", |b| {
+        b.iter(|| black_box(query.try_search("scanner").unwrap()))
+    });
+    group.bench_function("search_prefix", |b| {
+        b.iter(|| {
+            black_box(
+                query
+                    .search_with_options("scan", &SearchOptions::new().with_prefix(true))
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_full_reindex,
+    bench_incremental_update,
+    bench_search
+);
 criterion_main!(benches);
