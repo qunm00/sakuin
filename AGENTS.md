@@ -2,6 +2,7 @@
 
 - Don't abbreviate variable names; use full descriptive names (e.g., `relative_path` instead of `rel_path`, `absolute_path` instead of `abs_path`, `wikilinks` instead of `wl`).
 - Never commit code without asking the user first. Always ask before running `git commit` (or any operation that creates commits).
+- Use Conventional Commits for all commit messages: `type(scope): description` with body paragraphs as bullet points (e.g., `docs(search): document options` or `feat(indexer): add incremental updates`).
 - Delegate the continual-learning memory update to a subagent instead of running it in the main context.
 - Prefer guard clauses (early `continue`/`return`) over nested `if` blocks.
 - For infrastructure/tooling work, write the plan as a doc under `docs/features/*.md` first and get approval before writing any code; do not install or change anything on the host machine.
